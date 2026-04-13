@@ -175,4 +175,4 @@ uv run pytest tests/test_registry.py
 
 ## License
 
-MIT
+Apache 2.0
