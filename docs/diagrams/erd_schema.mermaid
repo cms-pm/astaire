@@ -1,0 +1,126 @@
+---
+title: "Memory Palace — Entity Relationship Diagram"
+---
+erDiagram
+    SOURCE {
+        text source_id PK "ulid — immutable raw source"
+        text title "human-readable name"
+        text source_type "article | paper | transcript | note | code"
+        text content_hash "sha256 of raw content"
+        text file_path "path to raw file on disk"
+        text media_type "text/markdown | application/pdf | …"
+        integer token_count "approximate token length"
+        text ingested_at "ISO-8601 timestamp"
+        text metadata_json "arbitrary k/v (author, url, tags…)"
+    }
+
+    ENTITY {
+        text entity_id PK "ulid"
+        text canonical_name "de-duped display name"
+        text entity_type "person | org | system | concept | place | event"
+        text description "one-line summary, LLM-generated"
+        text created_at "ISO-8601"
+        text updated_at "ISO-8601"
+        text aliases_json "['GPT-4o', 'gpt4o', 'GPT 4o']"
+    }
+
+    CLAIM {
+        text claim_id PK "ulid"
+        text entity_id FK "subject of the claim"
+        text predicate "verb / relation label"
+        text value "object — free text or structured"
+        text claim_type "fact | opinion | metric | status | definition"
+        real confidence "0.0–1.0, LLM-assessed"
+        text epistemic_tag "confirmed | provisional | contested | retracted"
+        text source_id FK "provenance"
+        text source_span "page/paragraph locator in raw source"
+        text superseded_by FK "claim_id that replaces this one (nullable)"
+        text created_at "ISO-8601"
+        text updated_at "ISO-8601"
+        text expires_at "ISO-8601 nullable — tactical claims TTL"
+    }
+
+    RELATIONSHIP {
+        text rel_id PK "ulid"
+        text from_entity_id FK "source node"
+        text to_entity_id FK "target node"
+        text rel_type "supports | contradicts | depends_on | evolved_into | part_of | related_to | tested_by"
+        real weight "0.0–1.0 strength"
+        text evidence_claim_id FK "claim backing this edge (nullable)"
+        text source_id FK "provenance"
+        text created_at "ISO-8601"
+    }
+
+    TOPIC_CLUSTER {
+        text cluster_id PK "ulid"
+        text label "LLM-generated cluster name"
+        text summary "2-3 sentence digest"
+        text parent_cluster_id FK "nullable — hierarchical topics"
+        integer claim_count "materialized count"
+        text created_at "ISO-8601"
+        text updated_at "ISO-8601"
+    }
+
+    CLAIM_CLUSTER {
+        text claim_id FK
+        text cluster_id FK
+        real relevance "0.0–1.0"
+    }
+
+    CONTRADICTION {
+        text contradiction_id PK "ulid"
+        text claim_a_id FK
+        text claim_b_id FK
+        text description "LLM-generated explanation"
+        text resolution_status "open | resolved | deferred"
+        text resolved_by_claim_id FK "nullable — winning claim"
+        text detected_at "ISO-8601"
+        text resolved_at "ISO-8601 nullable"
+    }
+
+    PROJECTION_CACHE {
+        text cache_id PK "ulid"
+        text tier "L0 | L1 | L2"
+        text scope_key "global | cluster:{id} | entity:{id} | query:{hash}"
+        text content_md "pre-rendered markdown context block"
+        integer token_count "approximate"
+        text content_hash "sha256 — for staleness detection"
+        text generated_at "ISO-8601"
+        text expires_at "ISO-8601 — force regeneration"
+        text generator_model "claude-sonnet-4-20250514"
+    }
+
+    INGEST_LOG {
+        text log_id PK "ulid"
+        text operation "ingest | query | lint | recompile | prune"
+        text source_id FK "nullable"
+        text summary "what happened"
+        integer claims_created
+        integer claims_updated
+        integer claims_superseded
+        integer entities_created
+        integer relationships_created
+        integer contradictions_found
+        text created_at "ISO-8601"
+    }
+
+    %% ── Relationships ──
+
+    SOURCE        ||--o{ CLAIM            : "provenance"
+    SOURCE        ||--o{ RELATIONSHIP     : "provenance"
+    SOURCE        ||--o{ INGEST_LOG       : "tracks"
+
+    ENTITY        ||--o{ CLAIM            : "subject"
+    ENTITY        ||--o{ RELATIONSHIP     : "from"
+    ENTITY        ||--o{ RELATIONSHIP     : "to"
+
+    CLAIM         ||--o| CLAIM            : "superseded_by"
+    CLAIM         ||--o{ CLAIM_CLUSTER    : "membership"
+    CLAIM         ||--o{ CONTRADICTION    : "claim_a"
+    CLAIM         ||--o{ CONTRADICTION    : "claim_b"
+    CLAIM         |o--o| RELATIONSHIP     : "evidence"
+
+    TOPIC_CLUSTER ||--o{ CLAIM_CLUSTER    : "membership"
+    TOPIC_CLUSTER |o--o| TOPIC_CLUSTER    : "parent"
+
+    CONTRADICTION |o--o| CLAIM            : "resolved_by"

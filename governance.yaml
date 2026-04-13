@@ -1,0 +1,165 @@
+# Astaire Governance Manifest
+# Per ai-dev-governance/core/AUTONOMOUS_DELIVERY_GOVERNANCE.md
+
+project:
+  name: astaire
+  description: Hybrid memory palace — structured knowledge store for AI agents
+  repository: local
+
+profile: strict-baseline
+
+adapters:
+  providers:
+    - claude
+  tooling:
+    - rtk
+
+automation:
+  lifecycle:
+    - ingest
+    - plan
+    - artifact-generation
+    - implementation
+    - validation
+    - board-review
+    - gate
+    - release
+  risk_tiers:
+    low:
+      auto_merge: true
+      human_approvals: 0
+      board_required: false
+    medium:
+      auto_merge: false
+      human_approvals: 1
+      board_required: false
+    high:
+      auto_merge: false
+      human_approvals: 2
+      board_required: true
+    critical:
+      auto_merge: false
+      human_approvals: 2
+      board_required: true
+  stop_rules:
+    critical_findings_block_release: true
+    missing_artifacts_block_transition: true
+    failed_checks_block_merge: true
+
+evidence:
+  planning: docs/planning/
+  validation: docs/validation/
+  releases: docs/releases/
+  board: docs/planning/board/
+
+exceptions: docs/governance/exceptions.yaml
+
+board:
+  composition: docs/planning/board/board-selection-dossier-2026-04-11.md
+  chair: BM-007  # Andrej Karpathy (simulation)
+  refresh_cadence: per-phase
+  last_review: MTG-0002
+
+phases:
+  1:
+    name: Foundation and Registry
+    status: implemented
+    chunks:
+      - id: "1.1"
+        name: Utility modules
+        risk_tier: low
+        status: complete
+      - id: "1.2"
+        name: Database layer
+        risk_tier: low
+        status: complete
+      - id: "1.3"
+        name: Document registry core
+        risk_tier: medium
+        status: complete
+      - id: "1.4"
+        name: Performance benchmarks (FND-0001, FND-0002)
+        risk_tier: low
+        status: complete
+        board_finding: FND-0001
+  2:
+    name: Bootstrap ai-dev-governance collection
+    status: complete
+    chunks:
+      - id: "2.1"
+        name: Collection config and scan helper
+        risk_tier: low
+        status: complete
+      - id: "2.2"
+        name: Register governance artifacts
+        risk_tier: low
+        status: complete
+  3:
+    name: Projection engine
+    status: complete
+    chunks:
+      - id: "3.1"
+        name: L0 generator and cache invalidation
+        risk_tier: low
+        status: complete
+      - id: "3.2"
+        name: L1 generators (cluster, entity, collection)
+        risk_tier: medium
+        status: complete
+      - id: "3.3"
+        name: Unified query context assembly
+        risk_tier: medium
+        status: complete
+  4:
+    name: Ingest pipeline
+    status: complete
+    chunks:
+      - id: "4.1"
+        name: Document ingestion and directory scanning
+        risk_tier: low
+        status: complete
+      - id: "4.2"
+        name: Source ingestion with claim processing
+        risk_tier: medium
+        status: complete
+      - id: "4.3"
+        name: "Contradiction transaction atomicity (FND-0011)"
+        risk_tier: low
+        status: complete
+        board_finding: FND-0011
+      - id: "4.4"
+        name: "L1 cache invalidation in ingest paths (FND-0014)"
+        risk_tier: low
+        status: complete
+        board_finding: FND-0014
+      - id: "4.5"
+        name: "Atomic entity find-or-create (FND-0012)"
+        risk_tier: low
+        status: complete
+        board_finding: FND-0012
+      - id: "4.6"
+        name: "Document source linkage trade-off docs (FND-0013)"
+        risk_tier: low
+        status: complete
+        board_finding: FND-0013
+      - id: "4.7"
+        name: "Scan directory error handling (FND-0015)"
+        risk_tier: low
+        status: complete
+        board_finding: FND-0015
+  5:
+    name: Lint, Export, Prune
+    status: complete
+    chunks:
+      - id: "5.1"
+        name: Lint — health checks
+        risk_tier: medium
+        status: complete
+      - id: "5.2"
+        name: Export — wiki generation
+        risk_tier: low
+        status: complete
+      - id: "5.3"
+        name: Prune — TTL expiry and cleanup
+        risk_tier: medium
+        status: complete

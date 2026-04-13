@@ -1,0 +1,139 @@
+---
+title: "Memory Palace — System Architecture"
+---
+flowchart TB
+    subgraph HUMAN["👤 Human Operator"]
+        direction LR
+        H_SOURCE["Drop raw source\n(article, paper, transcript)"]
+        H_QUERY["Ask question\nor give command"]
+        H_BROWSE["Browse wiki\nin Obsidian"]
+        H_FEEDBACK["Approve / Reject\n(feedback loop)"]
+    end
+
+    subgraph RAW["📦 Layer 0 — Raw Sources (Immutable)"]
+        direction LR
+        RAW_DIR["raw/\n├─ articles/\n├─ papers/\n├─ transcripts/\n├─ images/\n└─ data/"]
+    end
+
+    subgraph INGEST["⚙️ Ingest Pipeline"]
+        direction TB
+        DETECT["Detect new / changed\nsource files"]
+        EXTRACT["LLM: Extract entities,\nclaims, relationships"]
+        DEDUP["De-duplicate entities\n(alias resolution)"]
+        CONTRADICT["Detect contradictions\nwith existing claims"]
+        SUPERSEDE["Supersede stale claims\n(temporal ordering)"]
+        RECOMPILE["Regenerate L0 cache\n+ affected L1 clusters"]
+        LOG_INGEST["Append to ingest_log"]
+
+        DETECT --> EXTRACT --> DEDUP --> CONTRADICT --> SUPERSEDE --> RECOMPILE --> LOG_INGEST
+    end
+
+    subgraph STORE["🗄️ Layer 1 — Structured Store (Source of Truth)"]
+        direction TB
+        SQLITE[("SQLite\n+ FTS5 index")]
+        subgraph TABLES["Tables"]
+            direction LR
+            T_SRC["source"]
+            T_ENT["entity"]
+            T_CLM["claim"]
+            T_REL["relationship"]
+            T_TOP["topic_cluster"]
+            T_CON["contradiction"]
+            T_LOG["ingest_log"]
+        end
+        CACHE[("projection_cache\n(L0 / L1 / L2)")]
+        SQLITE --- TABLES
+        SQLITE --- CACHE
+    end
+
+    subgraph PROJECT["🔮 Layer 2 — Projection Engine"]
+        direction TB
+        ROUTER{"Query Router"}
+        L0_READ["Read L0 global summary\n(always cached, ~2K tokens)"]
+        FTS["FTS5 keyword search"]
+        GRAPH["Graph traversal\n(entity → claims → relationships)"]
+        ASSEMBLE["Assemble context document\n(L0 + relevant L1 + optional L2)"]
+        TOKEN_BUDGET["Trim to token budget\n(priority × recency × confidence)"]
+
+        ROUTER --> L0_READ
+        ROUTER --> FTS
+        ROUTER --> GRAPH
+        L0_READ --> ASSEMBLE
+        FTS --> ASSEMBLE
+        GRAPH --> ASSEMBLE
+        ASSEMBLE --> TOKEN_BUDGET
+    end
+
+    subgraph LLM_LAYER["🧠 LLM Reasoning"]
+        CONTEXT["Injected context\n(system prompt + projected memory)"]
+        REASON["LLM generates answer"]
+        FILE_BACK{"Worth keeping?"}
+        NEW_CLAIM["Write answer back\nas new claims"]
+
+        CONTEXT --> REASON --> FILE_BACK
+        FILE_BACK -- "yes" --> NEW_CLAIM
+        FILE_BACK -- "no" --> RESPOND
+    end
+
+    subgraph EXPORT["📄 Layer 3 — Presentation (Read-Only)"]
+        direction TB
+        MAKE_WIKI["make wiki\n(scheduled or on-demand)"]
+        WIKI_DIR["wiki/\n├─ index.md\n├─ entities/\n│   ├─ person_*.md\n│   └─ concept_*.md\n├─ topics/\n├─ contradictions.md\n├─ timeline.md\n└─ graph_report.md"]
+        OBSIDIAN["Obsidian\n(graph view, Dataview,\nbrowse + read only)"]
+
+        MAKE_WIKI --> WIKI_DIR --> OBSIDIAN
+    end
+
+    subgraph MAINT["🔧 Maintenance (Cron)"]
+        direction LR
+        LINT["Lint:\norphans, contradictions,\nstale claims, missing entities"]
+        PRUNE["Prune:\nexpire tactical claims\n(TTL-based)"]
+        REINDEX["Reindex:\nrebuild FTS5,\nregenerate L0/L1 caches"]
+        HEALTH["Health check:\nreport to health.md"]
+
+        LINT ~~~ PRUNE ~~~ REINDEX ~~~ HEALTH
+    end
+
+    RESPOND(["💬 Response to user"])
+
+    %% ── Flows ──
+
+    H_SOURCE --> RAW_DIR
+    RAW_DIR --> DETECT
+    LOG_INGEST --> SQLITE
+    SUPERSEDE --> SQLITE
+    RECOMPILE --> CACHE
+
+    H_QUERY --> ROUTER
+    TOKEN_BUDGET --> CONTEXT
+    NEW_CLAIM --> SQLITE
+
+    SQLITE --> MAKE_WIKI
+    SQLITE --> FTS
+    SQLITE --> GRAPH
+    CACHE --> L0_READ
+
+    H_BROWSE --> OBSIDIAN
+    H_FEEDBACK --> SQLITE
+
+    MAINT --> SQLITE
+
+    %% ── Styling ──
+
+    classDef human fill:#e8f4f8,stroke:#2980b9,stroke-width:2px
+    classDef raw fill:#fef9e7,stroke:#f39c12,stroke-width:2px
+    classDef ingest fill:#fdebd0,stroke:#e67e22,stroke-width:2px
+    classDef store fill:#d5f5e3,stroke:#27ae60,stroke-width:2px
+    classDef project fill:#e8daef,stroke:#8e44ad,stroke-width:2px
+    classDef llm fill:#fadbd8,stroke:#e74c3c,stroke-width:2px
+    classDef export fill:#d6eaf8,stroke:#2e86c1,stroke-width:2px
+    classDef maint fill:#f2f3f4,stroke:#7f8c8d,stroke-width:1px,stroke-dasharray: 5 5
+
+    class HUMAN human
+    class RAW raw
+    class INGEST ingest
+    class STORE store
+    class PROJECT project
+    class LLM_LAYER llm
+    class EXPORT export
+    class MAINT maint

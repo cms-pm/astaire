@@ -1,0 +1,77 @@
+---
+title: "Memory Palace — Claim Lifecycle State Machine"
+---
+stateDiagram-v2
+    [*] --> Extracted: LLM reads raw source
+
+    state "Extracted" as Extracted {
+        direction LR
+        [*] --> Parsing: Source text → LLM
+        Parsing --> Structured: entity + predicate + value
+    }
+
+    Extracted --> DeduplicateCheck: Entity alias resolution
+
+    state "Deduplicate Check" as DeduplicateCheck {
+        direction TB
+        [*] --> ExistingEntity: Entity already known?
+        ExistingEntity --> MergeAliases: Yes — merge aliases
+        ExistingEntity --> CreateEntity: No — new entity
+    }
+
+    DeduplicateCheck --> ContradictionCheck: Claim vs existing claims
+
+    state "Contradiction Check" as ContradictionCheck {
+        direction TB
+        [*] --> Compare: Same entity + predicate?
+        Compare --> NoConflict: Values agree
+        Compare --> Conflict: Values disagree
+        Conflict --> LogContradiction: Write to contradiction table
+        LogContradiction --> TemporalOrder: Which is newer?
+        TemporalOrder --> SupersedeOld: New claim wins → old.superseded_by = new.id
+        TemporalOrder --> MarkContested: Ambiguous → both marked "contested"
+    }
+
+    ContradictionCheck --> Active: Claim stored
+
+    state "Active" as Active {
+        direction TB
+        state epistemic <<choice>>
+        [*] --> epistemic
+        epistemic --> Confirmed: High confidence + multiple sources
+        epistemic --> Provisional: Single source, moderate confidence
+        epistemic --> Contested: Contradicted, unresolved
+    }
+
+    Active --> Superseded: Newer claim replaces this one
+    Active --> Retracted: Source discredited or manually flagged
+    Active --> Expired: TTL elapsed (tactical claims only)
+    Active --> Active: Updated (confidence change, new corroboration)
+
+    Superseded --> [*]: Kept for audit trail\n(superseded_by points to replacement)
+    Retracted --> [*]: epistemic_tag = "retracted"
+    Expired --> [*]: Pruned by maintenance cron
+
+    state "Cache Impact" as CacheImpact {
+        direction TB
+        [*] --> InvalidateL1: L1 cluster cache stale
+        InvalidateL1 --> RegenerateL0: If claim touches L0 entities
+        RegenerateL0 --> Done: Caches rebuilt
+    }
+
+    Active --> CacheImpact: Any state change invalidates caches
+
+    note right of Active
+        Active claims are the ONLY claims
+        included in projection context.
+        Superseded/Retracted/Expired claims
+        are invisible to the LLM at query time
+        but preserved for provenance audit.
+    end note
+
+    note right of ContradictionCheck
+        Contradictions are first-class objects,
+        not error states. They surface in lint
+        reports and can be explicitly resolved
+        by the human or by new evidence.
+    end note

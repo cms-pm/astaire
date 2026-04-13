@@ -1,0 +1,66 @@
+---
+title: "Architecture Comparison — Three Approaches to LLM Knowledge"
+---
+flowchart LR
+    subgraph KARPATHY["Karpathy Wiki\n(File = Storage = Query)"]
+        direction TB
+        K_RAW["📦 raw/"] --> K_INGEST["LLM Ingest"]
+        K_INGEST --> K_WIKI["📄 wiki/*.md\n(hundreds of files)"]
+        K_WIKI --> K_INDEX["📋 index.md\n(read first)"]
+        K_INDEX --> K_READ1["📄 Read page 1"]
+        K_INDEX --> K_READ2["📄 Read page 2"]
+        K_INDEX --> K_READN["📄 Read page N"]
+        K_READ1 --> K_LLM["🧠 LLM\nReasoning"]
+        K_READ2 --> K_LLM
+        K_READN --> K_LLM
+
+        style K_READ1 fill:#ffcccc
+        style K_READ2 fill:#ffcccc
+        style K_READN fill:#ffcccc
+    end
+
+    subgraph GLAUCO["glaucobrito Unified Memory\n(Tiered Markdown)"]
+        direction TB
+        G_OBS["🔍 Observations\n(SQLite + ChromaDB)"] --> G_PRECOMPACT["⚙️ Daily\nPrecompact"]
+        G_PRECOMPACT --> G_L0["📋 MEMORY.md\n(L0 — always loaded)"]
+        G_PRECOMPACT --> G_L1["📄 decisions.md\nlessons.md\n(L1 — summaries at top)"]
+        G_PRECOMPACT --> G_L2["📄 Full content\n(L2 — on demand)"]
+        G_L0 --> G_BOOT["🚀 Boot\n(~8K tokens)"]
+        G_L1 --> G_BOOT
+        G_BOOT --> G_LLM["🧠 LLM\nReasoning"]
+        G_L2 -.-> G_LLM
+
+        style G_L2 fill:#fff3cd
+    end
+
+    subgraph HYBRID["Hybrid Memory Palace\n(Storage ≠ Query ≠ Presentation)"]
+        direction TB
+        H_RAW["📦 raw/"] --> H_INGEST["⚙️ Ingest Pipeline"]
+        H_INGEST --> H_DB[("🗄️ SQLite\n+ FTS5")]
+        H_DB --> H_PROJ["🔮 Projection\nEngine"]
+        H_PROJ --> H_CTX["📋 Assembled\nContext\n(one read)"]
+        H_CTX --> H_LLM["🧠 LLM\nReasoning"]
+        H_DB --> H_EXPORT["📄 make wiki\n(read-only export)"]
+        H_EXPORT --> H_OBS["👁️ Obsidian\n(browse only)"]
+
+        style H_CTX fill:#ccffcc
+        style H_PROJ fill:#e8daef
+    end
+
+    %% ── Annotations ──
+
+    K_LLM ~~~ COMPARE1
+    G_LLM ~~~ COMPARE2
+    H_LLM ~~~ COMPARE3
+
+    COMPARE1["❌ N file reads per query\n❌ Index scanning is O(n)\n✅ Simple, human-readable\n✅ Zero infrastructure"]
+    COMPARE2["⚠️ Still file-based at query time\n✅ Tiered loading (L0/L1/L2)\n✅ Session continuity (wip.md)\n✅ Feedback loop"]
+    COMPARE3["✅ O(1) for 80% of queries\n✅ FTS5 + graph for the rest\n✅ Structured provenance\n⚠️ More build complexity\n⚠️ Needs projection layer"]
+
+    style COMPARE1 fill:#fff,stroke:#ccc,text-align:left
+    style COMPARE2 fill:#fff,stroke:#ccc,text-align:left
+    style COMPARE3 fill:#fff,stroke:#ccc,text-align:left
+
+    style KARPATHY fill:#fef9e7,stroke:#f39c12,stroke-width:2px
+    style GLAUCO fill:#e8f4f8,stroke:#2980b9,stroke-width:2px
+    style HYBRID fill:#d5f5e3,stroke:#27ae60,stroke-width:2px

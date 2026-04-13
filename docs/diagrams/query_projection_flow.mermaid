@@ -1,0 +1,71 @@
+---
+title: "Memory Palace — Query-Time Projection (Critical Path)"
+---
+sequenceDiagram
+    autonumber
+
+    actor User
+    participant Router as Query Router
+    participant Cache as Projection Cache
+    participant FTS as FTS5 Index
+    participant Graph as Relationship Graph
+    participant Store as Claim Store (SQLite)
+    participant Assembler as Context Assembler
+    participant LLM as LLM Reasoning
+    participant Writeback as Writeback Pipeline
+
+    Note over User,Writeback: ── FAST PATH (80% of queries) ──
+
+    User ->> Router: "What's the current status of Project X?"
+    Router ->> Cache: Read L0 global summary (~2K tokens)
+    Cache -->> Router: L0 context (entity registry, hot topics, state)
+
+    Router ->> Router: Does L0 contain sufficient signal?
+    alt L0 sufficient (simple factual query)
+        Router ->> Assembler: L0 context only
+        Assembler ->> LLM: System prompt + L0 (single read, ~2K tokens)
+        LLM -->> User: Answer (no file reads in critical path)
+    end
+
+    Note over User,Writeback: ── STANDARD PATH (15% of queries) ──
+
+    Router ->> Cache: Check L1 cache for cluster "Project X"
+    alt L1 cache hit
+        Cache -->> Router: L1 cluster summary (~1-2K tokens)
+    else L1 cache miss
+        Router ->> FTS: keyword search "Project X status"
+        FTS -->> Router: ranked claim_ids
+        Router ->> Store: Fetch claims + entity context
+        Store -->> Router: claim rows + entity metadata
+        Router ->> Cache: Write L1 cache (scope_key: cluster:project_x)
+    end
+
+    Router ->> Assembler: L0 + L1 cluster context
+    Assembler ->> Assembler: Token budget check (trim by priority × recency × confidence)
+    Assembler ->> LLM: System prompt + L0 + L1 (~4-6K tokens)
+    LLM -->> User: Answer with citations
+
+    Note over User,Writeback: ── DEEP PATH (5% of queries) ──
+
+    User ->> Router: "Compare claim A vs claim B across all sources, noting contradictions"
+    Router ->> Cache: Read L0
+    Router ->> FTS: search "claim A" + "claim B"
+    FTS -->> Router: claim_ids for both
+    Router ->> Graph: Traverse from entities A, B — find shared edges, contradictions
+    Graph -->> Router: subgraph (entities, claims, relationships, contradictions)
+    Router ->> Store: Fetch full claim details + source spans (L2)
+    Store -->> Router: detailed claim rows + raw source excerpts
+    Router ->> Assembler: L0 + L1 + L2 source excerpts
+    Assembler ->> Assembler: Token budget enforcement
+    Assembler ->> LLM: Full context (~8-12K tokens)
+    LLM -->> User: Detailed comparative analysis
+
+    Note over User,Writeback: ── WRITEBACK (conditional) ──
+
+    LLM ->> LLM: Is this answer worth persisting?
+    alt Answer contains novel synthesis
+        LLM ->> Writeback: New claims extracted from answer
+        Writeback ->> Store: INSERT claims (source_type: "synthesis")
+        Writeback ->> Cache: Invalidate affected L0/L1 caches
+        Note over Writeback: L0 regeneration is async (next ingest cycle or immediate if critical)
+    end

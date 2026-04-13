@@ -1,0 +1,21 @@
+# Database
+db/*.db
+db/*.db-wal
+db/*.db-shm
+
+# Generated wiki (read-only export)
+wiki/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.venv/
+.python-version

@@ -1,0 +1,156 @@
+---
+title: "Memory Palace — SQLite DDL Schema"
+---
+%% This file documents the DDL as a class diagram since Mermaid
+%% doesn't have a native SQL notation. Each class = one table.
+%% See the companion .sql file for executable DDL.
+
+classDiagram
+    direction TB
+
+    class source {
+        +TEXT source_id PK
+        +TEXT title
+        +TEXT source_type
+        +TEXT content_hash
+        +TEXT file_path
+        +TEXT media_type
+        +INT  token_count
+        +TEXT ingested_at
+        +TEXT metadata_json
+    }
+
+    class entity {
+        +TEXT entity_id PK
+        +TEXT canonical_name UNIQUE
+        +TEXT entity_type
+        +TEXT description
+        +TEXT created_at
+        +TEXT updated_at
+        +TEXT aliases_json
+    }
+
+    class claim {
+        +TEXT claim_id PK
+        +TEXT entity_id FK
+        +TEXT predicate
+        +TEXT value
+        +TEXT claim_type
+        +REAL confidence
+        +TEXT epistemic_tag
+        +TEXT source_id FK
+        +TEXT source_span
+        +TEXT superseded_by FK
+        +TEXT created_at
+        +TEXT updated_at
+        +TEXT expires_at
+    }
+
+    class relationship {
+        +TEXT rel_id PK
+        +TEXT from_entity_id FK
+        +TEXT to_entity_id FK
+        +TEXT rel_type
+        +REAL weight
+        +TEXT evidence_claim_id FK
+        +TEXT source_id FK
+        +TEXT created_at
+    }
+
+    class topic_cluster {
+        +TEXT cluster_id PK
+        +TEXT label
+        +TEXT summary
+        +TEXT parent_cluster_id FK
+        +INT  claim_count
+        +TEXT created_at
+        +TEXT updated_at
+    }
+
+    class claim_cluster {
+        +TEXT claim_id FK
+        +TEXT cluster_id FK
+        +REAL relevance
+    }
+
+    class contradiction {
+        +TEXT contradiction_id PK
+        +TEXT claim_a_id FK
+        +TEXT claim_b_id FK
+        +TEXT description
+        +TEXT resolution_status
+        +TEXT resolved_by_claim_id FK
+        +TEXT detected_at
+        +TEXT resolved_at
+    }
+
+    class projection_cache {
+        +TEXT cache_id PK
+        +TEXT tier
+        +TEXT scope_key
+        +TEXT content_md
+        +INT  token_count
+        +TEXT content_hash
+        +TEXT generated_at
+        +TEXT expires_at
+        +TEXT generator_model
+    }
+
+    class ingest_log {
+        +TEXT log_id PK
+        +TEXT operation
+        +TEXT source_id FK
+        +TEXT summary
+        +INT  claims_created
+        +INT  claims_updated
+        +INT  claims_superseded
+        +INT  entities_created
+        +INT  relationships_created
+        +INT  contradictions_found
+        +TEXT created_at
+    }
+
+    class claim_fts {
+        <<FTS5 Virtual Table>>
+        +TEXT predicate
+        +TEXT value
+        +TEXT entity_name
+    }
+
+    class entity_fts {
+        <<FTS5 Virtual Table>>
+        +TEXT canonical_name
+        +TEXT description
+        +TEXT aliases
+    }
+
+    %% ── Relationships ──
+
+    source "1" --> "*" claim : provenance
+    source "1" --> "*" relationship : provenance
+    source "1" --> "*" ingest_log : tracks
+
+    entity "1" --> "*" claim : subject
+    entity "1" --> "*" relationship : from
+    entity "1" --> "*" relationship : to
+
+    claim "0..1" --> "0..1" claim : superseded_by
+    claim "1" --> "*" claim_cluster : membership
+    claim "1" --> "*" contradiction : claim_a / claim_b
+    claim "0..1" <-- "0..1" relationship : evidence
+
+    topic_cluster "1" --> "*" claim_cluster : contains
+    topic_cluster "0..1" --> "0..1" topic_cluster : parent
+
+    contradiction "0..1" --> "0..1" claim : resolved_by
+
+    claim_fts ..> claim : shadows (trigger-maintained)
+    entity_fts ..> entity : shadows (trigger-maintained)
+
+    %% ── Notes ──
+
+    note for claim_fts "FTS5 virtual table populated via\nINSERT/UPDATE/DELETE triggers on claim.\nEnables sub-millisecond full-text search\nwithout external infrastructure."
+
+    note for projection_cache "Tier L0: global summary (~2K tokens)\nTier L1: per-cluster digest (~1-2K each)\nTier L2: per-entity or per-query detail\n\nStale detection via content_hash comparison.\nRegenerated on ingest or by maintenance cron."
+
+    note for contradiction "First-class objects, not errors.\nSurface in lint reports.\nCan trigger L0/L1 cache invalidation\nwhen resolution_status changes."
