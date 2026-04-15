@@ -1,0 +1,4 @@
+{"type":"system","subtype":"session_start","sessionId":"ses_test","cwd":"/tmp/myproject","version":"2.1.0","timestamp":"2026-04-10T10:00:00Z","uuid":"sys1","isMeta":true}
+{"type":"summary","summary":"Refactoring auth module","leafUuid":"leaf1"}
+{"type":"user","message":{"role":"user","content":"Refactor the auth module to use JWT tokens"},"timestamp":"2026-04-10T10:01:00Z","uuid":"u1","parentUuid":null,"isSidechain":false}
+{"type":"assistant","message":{"role":"assistant","content":"I'll refactor the auth module...","model":"claude-sonnet-4-5-20250514"},"timestamp":"2026-04-10T10:01:05Z","uuid":"a1","parentUuid":"u1"}

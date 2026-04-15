@@ -1,0 +1,4 @@
+{"type":"session_meta","timestamp":"2026-04-10T10:00:00Z","payload":{"id":"019d0000-test","cwd":"/tmp/webapp","cli_version":"0.119.0","model_provider":"openai","source":"cli"}}
+{"type":"event_msg","timestamp":"2026-04-10T10:00:01Z","payload":{"type":"task_started","model_context_window":258400}}
+{"type":"response_item","timestamp":"2026-04-10T10:00:02Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Fix the login page CSS"}]}}
+{"type":"response_item","timestamp":"2026-04-10T10:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll fix the CSS..."}]}}

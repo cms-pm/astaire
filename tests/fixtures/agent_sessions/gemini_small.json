@@ -1,0 +1,1 @@
+{"startTime":"2026-04-10T10:00:00Z","lastUpdated":"2026-04-10T10:05:00Z","sessionId":"session-test","projectHash":"abc123","messages":[{"id":"m1","type":"user","timestamp":"2026-04-10T10:00:01Z","content":"Optimize the database queries"},{"id":"m2","type":"gemini","timestamp":"2026-04-10T10:00:02Z","content":"I'll analyze the queries...","model":"gemini-3-flash"}]}

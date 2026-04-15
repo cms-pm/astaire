@@ -1,0 +1,2 @@
+{"type":"system","subtype":"session_start","sessionId":"ses_hk","cwd":"/tmp","version":"2.1.0","timestamp":"2026-04-10T10:00:00Z","uuid":"sys1","isMeta":true}
+{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"},"timestamp":"2026-04-10T10:00:01Z","uuid":"u1","parentUuid":null,"isSidechain":false,"isMeta":true}

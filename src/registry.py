@@ -109,11 +109,16 @@ def register_document(
     metadata: dict | None = None,
     status: str = "draft",
     encoding: str = "cl100k_base",
+    content_hash: str | None = None,
+    token_count: int | None = None,
 ) -> str:
     """Register a document in a collection. Returns the document_id.
 
     file_path must point to an existing file. Its content is hashed and
     token-counted but not stored in the database.
+
+    Pass content_hash and token_count to skip reading the file contents.
+    Useful for large files (e.g. session JSONL) where reading is expensive.
 
     tags is a dict mapping tag_key to a single value or list of values:
         {"stage": "implementation", "chunk": ["1.2", "1.3"]}
@@ -135,9 +140,12 @@ def register_document(
     if not path.exists():
         raise FileNotFoundError(f"Document file not found: {path}")
 
-    content_hash = hashing.hash_file(path)
-    content = path.read_text(encoding="utf-8")
-    token_count = tokens.count_tokens(content, encoding)
+    if content_hash is None or token_count is None:
+        file_content = path.read_text(encoding="utf-8")
+        if content_hash is None:
+            content_hash = hashing.hash_file(path)
+        if token_count is None:
+            token_count = tokens.count_tokens(file_content, encoding)
     document_id = ulid.generate()
     metadata_json = json.dumps(metadata or {})
 

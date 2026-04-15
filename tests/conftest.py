@@ -12,3 +12,20 @@ def db_conn():
     init_db(conn)
     yield conn
     conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_agent_sessions(monkeypatch):
+    """Prevent agent-sessions plugin from scanning real ~/. directories during tests."""
+    monkeypatch.setattr(
+        "src.collections.agent_sessions._discover_claude_sessions",
+        lambda root=None: [],
+    )
+    monkeypatch.setattr(
+        "src.collections.agent_sessions._discover_codex_sessions",
+        lambda root=None: [],
+    )
+    monkeypatch.setattr(
+        "src.collections.agent_sessions._discover_gemini_sessions",
+        lambda root=None: [],
+    )

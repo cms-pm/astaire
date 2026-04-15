@@ -232,7 +232,11 @@ class TestQuery:
         cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
         # Discover which collection was registered
         conn = get_connection(db_path)
-        col_name = conn.execute("SELECT name FROM collection LIMIT 1").fetchone()["name"]
+        col_name = conn.execute(
+            """SELECT c.name FROM collection c
+               JOIN document d ON d.collection_id = c.collection_id
+               GROUP BY c.name ORDER BY COUNT(*) DESC LIMIT 1"""
+        ).fetchone()["name"]
         conn.close()
         return db_path, col_name
 
@@ -309,7 +313,11 @@ class TestContext:
 
         # Discover collection name dynamically
         conn = get_connection(db_path)
-        col_name = conn.execute("SELECT name FROM collection LIMIT 1").fetchone()["name"]
+        col_name = conn.execute(
+            """SELECT c.name FROM collection c
+               JOIN document d ON d.collection_id = c.collection_id
+               GROUP BY c.name ORDER BY COUNT(*) DESC LIMIT 1"""
+        ).fetchone()["name"]
         conn.close()
 
         cmd_context(_args(
