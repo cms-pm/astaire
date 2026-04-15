@@ -18,6 +18,7 @@ COLLECTION_NAME = "ai-dev-governance"
 
 COLLECTION_CONFIG = {
     "doc_types": [
+        # Project SDLC artifacts (produced during development)
         "pool-question",
         "signoff",
         "risk-log",
@@ -35,6 +36,14 @@ COLLECTION_CONFIG = {
         "validation-evidence",
         "exception-registry",
         "governance-manifest",
+        "release-evidence",
+        # Methodology source documents (from ai-dev-governance submodule)
+        "methodology-core",
+        "methodology-adapter",
+        "methodology-runbook",
+        "methodology-template",
+        "methodology-contract",
+        "methodology-validation",
     ],
     "lifecycle_stages": [
         "ingest",
@@ -52,6 +61,8 @@ COLLECTION_CONFIG = {
         "chunk",
         "phase",
         "risk_tier",
+        "source",      # "project" | "methodology"
+        "category",    # "core" | "adapter" | "runbook" | "template" | "contract"
     ],
     "statuses": [
         "draft",
@@ -66,29 +77,47 @@ COLLECTION_CONFIG = {
 # Patterns are matched against the file path relative to the project root.
 # Additional tags (phase, chunk) are extracted from filenames where possible.
 SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
-    ("docs/planning/pool_questions/", "pool-question", {"stage_produced": "plan"}),
-    ("docs/planning/scenarios/", "gherkin", {"stage_produced": "artifact-generation"}),
-    ("docs/planning/chunks/", "chunk-plan", {"stage_produced": "plan"}),
-    ("docs/planning/signoffs.md", "signoff", {"stage_produced": "plan"}),
-    ("docs/planning/traceability.md", "traceability", {"stage_produced": "artifact-generation"}),
-    ("docs/planning/phase-", "risk-log", {"stage_produced": "plan"}),
-    ("docs/planning/board/board-selection-", "board-selection", {"stage_produced": "plan"}),
-    ("docs/planning/board/committee-review-packet-", "board-packet", {"stage_produced": "board-review"}),
-    ("docs/planning/board/committee-virtual-meeting-", "meeting-record", {"stage_produced": "board-review"}),
-    ("docs/planning/board/members/", "board-member-profile", {"stage_produced": "plan"}),
-    ("docs/plan/implementation-plan.md", "implementation-plan", {"stage_produced": "plan"}),
-    ("docs/governance/exceptions.yaml", "exception-registry", {}),
-    ("governance.yaml", "governance-manifest", {"stage_produced": "ingest"}),
+    # ── Project SDLC artifacts ────────────────────────────────────────────────
+    ("docs/planning/pool_questions/", "pool-question", {"stage_produced": "plan", "source": "project"}),
+    ("docs/planning/scenarios/", "gherkin", {"stage_produced": "artifact-generation", "source": "project"}),
+    ("docs/planning/chunks/", "chunk-plan", {"stage_produced": "plan", "source": "project"}),
+    ("docs/planning/signoffs.md", "signoff", {"stage_produced": "plan", "source": "project"}),
+    ("docs/planning/traceability.md", "traceability", {"stage_produced": "artifact-generation", "source": "project"}),
+    ("docs/planning/phase-", "risk-log", {"stage_produced": "plan", "source": "project"}),
+    ("docs/planning/board/board-selection-", "board-selection", {"stage_produced": "plan", "source": "project"}),
+    ("docs/planning/board/committee-review-packet-", "board-packet", {"stage_produced": "board-review", "source": "project"}),
+    ("docs/planning/board/committee-virtual-meeting-", "meeting-record", {"stage_produced": "board-review", "source": "project"}),
+    ("docs/planning/board/members/", "board-member-profile", {"stage_produced": "plan", "source": "project"}),
+    ("docs/governance/exceptions.yaml", "exception-registry", {"source": "project"}),
+    ("docs/validation/", "validation-evidence", {"stage_produced": "validation", "source": "project"}),
+    ("docs/releases/", "release-evidence", {"stage_produced": "release", "source": "project"}),
+    ("governance.yaml", "governance-manifest", {"stage_produced": "ingest", "source": "project"}),
+    # ── Methodology source documents (ai-dev-governance submodule) ────────────
+    ("ai-dev-governance/core/", "methodology-core", {"source": "methodology", "category": "core"}),
+    ("ai-dev-governance/adapters/profiles/", "methodology-adapter", {"source": "methodology", "category": "adapter"}),
+    ("ai-dev-governance/adapters/providers/", "methodology-adapter", {"source": "methodology", "category": "adapter"}),
+    ("ai-dev-governance/adapters/tooling/", "methodology-adapter", {"source": "methodology", "category": "adapter"}),
+    ("ai-dev-governance/runbooks/", "methodology-runbook", {"source": "methodology", "category": "runbook"}),
+    ("ai-dev-governance/templates/", "methodology-template", {"source": "methodology", "category": "template"}),
+    ("ai-dev-governance/contracts/", "methodology-contract", {"source": "methodology", "category": "contract"}),
+    ("ai-dev-governance/validation/", "methodology-validation", {"source": "methodology", "category": "validation"}),
 ]
 
 
 def register_collection(conn: sqlite3.Connection) -> str:
-    """Create the ai-dev-governance collection if it doesn't exist. Returns collection_id."""
+    """Create or update the ai-dev-governance collection. Returns collection_id."""
+    import json
     existing = get_collection(conn, COLLECTION_NAME)
     if existing:
+        # Update config in place so new doc_types are always recognised
+        conn.execute(
+            "UPDATE collection SET config_json = ? WHERE collection_id = ?",
+            (json.dumps(COLLECTION_CONFIG), existing["collection_id"]),
+        )
+        conn.commit()
         return existing["collection_id"]
     return create_collection(
-        conn, COLLECTION_NAME, "SDLC artifacts for ai-dev-governance methodology", COLLECTION_CONFIG
+        conn, COLLECTION_NAME, "SDLC and methodology artifacts for ai-dev-governance", COLLECTION_CONFIG
     )
 
 
@@ -143,7 +172,12 @@ def scan_and_register(
         for filepath in files:
             if not filepath.is_file():
                 continue
-            if filepath.suffix in (".pyc", ".pyo"):
+            if filepath.suffix in (".pyc", ".pyo", ".git"):
+                continue
+            # Skip non-text files and hidden files
+            if filepath.name.startswith("."):
+                continue
+            if filepath.suffix not in (".md", ".yaml", ".yml", ".json", ".feature", ".sh", ".toml", ""):
                 continue
 
             path_str = str(filepath)
