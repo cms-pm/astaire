@@ -6,12 +6,12 @@ A hybrid memory palace — structured, persistent knowledge store that sits betw
 
 LLM workflows typically read raw files for context. This is slow, expensive, and unstructured. Astaire provides:
 
-- **270:1 token compression** — L0 summary captures full knowledge base state in 263 tokens vs 71,223 tokens of raw documents
-- **44.3% token savings** on scoped context assembly with budget enforcement
-- **362x faster** tag-based queries vs filesystem glob+read
-- **7.3x faster** full collection assembly vs sequential file reads
+- **159:1 token compression** — L0 summary captures full knowledge base state in 563 tokens vs 89,900 tokens of raw documents
+- **57.8% token savings** on scoped context assembly with budget enforcement
+- **133.1x faster** tag-based queries vs filesystem glob+read
+- **8.9x faster** full collection assembly vs sequential file reads
 
-These are measured results from a 72-document governance collection. See [benchmarks](#benchmarks) for details.
+These are measured results from the `ai-dev-governance` dogfood workspace on `v0.6.0`, using a `96`-document dataset across `3` collections. See [benchmarks](#benchmarks) for details.
 
 ## Installation
 
@@ -76,11 +76,27 @@ Astaire separates three concerns that are typically coupled:
 
 The projection cache provides tiered context at three levels:
 
-- **L0** — Global summary (~300 tokens). Regenerated after every write. 80% of queries answerable from L0 alone.
+- **L0** — Global summary (~500 tokens in the `v0.6.0` dogfood workspace). Regenerated after every write. It carries registry state, key metrics, recent activity, and canonical `route:` lines for deeper tentacles.
 - **L1** — Per-scope digests (~2K tokens each). Per-entity, per-cluster, per-collection.
 - **L2** — Per-query detail with source excerpts. Generated on demand.
 
 See `docs/diagrams/` for Mermaid diagrams of the full architecture.
+
+## Astaire As Broker
+
+Astaire is meant to be the broker of context, not just a database. In the `ai-dev-governance` integration:
+
+- **Astaire L0** is the port of first resort for low-token orientation and recent activity.
+- **Astaire L1/L2** handle scoped recall when a question needs more than the global summary.
+- **graphify** contributes structural routes so agents can jump directly into codebase topology instead of re-reading the filesystem.
+
+In the current `v0.6.0` dogfood release snapshot, Astaire carries:
+
+- `5` active claims
+- `5` entities
+- `1` relationship
+- a live `route: tentacle=graphify.query; ...` hand-off in L0
+- a fresh no-op graphify verification entry in recent activity so release evidence stays current even when imports are unchanged
 
 ## Collections
 
@@ -138,16 +154,24 @@ All commands accept `--db PATH` to use a non-default database and `-v` for verbo
 uv run python -m benchmarks.bench_context --db db/memory_palace.db --root .
 ```
 
+In restricted or sandboxed environments, set a writable `uv` cache explicitly:
+
+```bash
+UV_CACHE_DIR=/tmp/uvcache uv run --project astaire python -m benchmarks.bench_context --db .astaire/memory_palace.db --root .
+```
+
 ### Results
 
-Measured against a 72-document governance collection on a MacBook (2026-04-12):
+Measured against the `ai-dev-governance` dogfood workspace on a MacBook (`v0.6.0`, 2026-04-20), with `96` registered documents across `3` collections:
 
 | Metric | Astaire | Raw FS | Improvement |
 |--------|---------|--------|-------------|
-| Tag query latency | 1.19ms | 430ms | **362x faster** |
-| Scoped context tokens (budget=4K) | 3,880 | 6,966 | **44.3% fewer tokens** |
-| L0 vs all documents | 263 tokens | 71,223 tokens | **99.6% savings / 270:1** |
-| Full collection assembly | 30.78ms | 225.9ms | **7.3x faster** |
+| Tag query latency | 3.03ms | 403.12ms | **133.1x faster** |
+| Scoped context tokens (budget=4K) | 2,125 | 5,035 | **57.8% fewer tokens** |
+| L0 vs all documents | 563 tokens | 89,900 tokens | **99.4% savings / 159:1** |
+| Full collection assembly | 21.9ms | 194.88ms | **8.9x faster** |
+
+The full captured benchmark artifact lives at [docs/benchmarks/v0.6.0-ai-dev-governance.md](docs/benchmarks/v0.6.0-ai-dev-governance.md).
 
 ### Methodology
 
