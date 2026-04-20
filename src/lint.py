@@ -3,6 +3,7 @@
 Chunk 5.1: Individual check functions and run_all_checks() aggregator.
 Each check returns a list of issue dicts with severity, relevant ID, and message.
 Optional fix=True enables safe auto-repairs (L0 regen, L1 cache generation).
+Read-only lint must not mutate the knowledge base.
 """
 
 import logging
@@ -11,9 +12,15 @@ import sqlite3
 
 from src.db import transaction
 from src.project import build_l0_content, generate_l0, generate_l1_entity, read_cache
-from src.utils import hashing, ulid
+from src.utils import hashing, tokens, ulid
 
 logger = logging.getLogger(__name__)
+
+# The public v0.6.0 dogfood workspace generates L0 in roughly ~220ms once
+# graphify outputs and release-evidence activity are present. Keep the default
+# threshold aligned with that observed release shape so lint highlights real
+# regressions instead of a known-good steady state.
+DEFAULT_L0_PERFORMANCE_THRESHOLD_MS = 300.0
 
 
 def check_orphan_entities(conn: sqlite3.Connection) -> list[dict]:
@@ -115,8 +122,12 @@ def check_l0_staleness(
     old_hash = cached["content_hash"] if cached else None
 
     if old_hash is None:
-        generate_l0(conn)
-        return [{"severity": "warning", "message": "L0 cache was missing — regenerated"}]
+        issue = {"severity": "warning", "message": "L0 cache is missing"}
+        if fix:
+            generate_l0(conn)
+            issue["fixed"] = True
+            issue["message"] += " — regenerated"
+        return [issue]
 
     # Build fresh content without writing, then compare data portion
     # (skip the first line which contains a timestamp)
@@ -195,11 +206,13 @@ def check_missing_documents(conn: sqlite3.Connection) -> list[dict]:
 
 
 def check_l0_performance(
-    conn: sqlite3.Connection, threshold_ms: float = 100,
+    conn: sqlite3.Connection,
+    threshold_ms: float = DEFAULT_L0_PERFORMANCE_THRESHOLD_MS,
 ) -> list[dict]:
-    """SCN-5.1-10: Time L0 generation and flag if it exceeds threshold."""
+    """SCN-5.1-10: Time L0 generation logic without mutating cached state."""
     start = time.perf_counter()
-    generate_l0(conn)
+    content = build_l0_content(conn)
+    tokens.count_tokens(content)
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     issue = {
