@@ -280,12 +280,15 @@ def query_documents(
 def _sanitize_fts_query(query: str) -> str:
     """Normalise a user-supplied FTS5 query.
 
-    SQLite FTS5 tokenises hyphens as term separators and treats the fragment
-    after the hyphen as a column-qualifier prefix (column:term syntax), causing
-    an OperationalError when no column with that name exists.  Replace hyphens
-    with spaces so callers can write 'SCN-D' and get 'SCN D' sent to FTS5.
+    FTS5 treats many punctuation characters as syntax: hyphens become
+    column-qualifier prefixes, periods/colons/asterisks/carets trigger
+    phrase or column operators, and unmatched parens/quotes cause parse
+    errors.  Replace every non-alphanumeric, non-whitespace character
+    with a space so callers can pass raw identifiers like 'SCN-3.2'
+    without triggering FTS5 syntax errors.
     """
-    return query.replace("-", " ")
+    import re
+    return re.sub(r"[^\w\s]", " ", query)
 
 
 def search_documents(conn: sqlite3.Connection, query: str) -> list[dict]:
