@@ -261,7 +261,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS claim_fts USING fts5(
     predicate,
     value,
     entity_name,
-    content = '',          -- contentless: we manage sync via triggers
     tokenize = 'porter unicode61'
 );
 
@@ -269,7 +268,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entity_fts USING fts5(
     canonical_name,
     description,
     aliases,
-    content = '',
     tokenize = 'porter unicode61'
 );
 
@@ -277,7 +275,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
     title,
     external_id,
     doc_type,
-    content = '',
     tokenize = 'porter unicode61'
 );
 

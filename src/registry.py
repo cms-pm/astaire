@@ -277,14 +277,26 @@ def query_documents(
     return [_enrich_document(conn, dict(r)) for r in rows]
 
 
+def _sanitize_fts_query(query: str) -> str:
+    """Normalise a user-supplied FTS5 query.
+
+    SQLite FTS5 tokenises hyphens as term separators and treats the fragment
+    after the hyphen as a column-qualifier prefix (column:term syntax), causing
+    an OperationalError when no column with that name exists.  Replace hyphens
+    with spaces so callers can write 'SCN-D' and get 'SCN D' sent to FTS5.
+    """
+    return query.replace("-", " ")
+
+
 def search_documents(conn: sqlite3.Connection, query: str) -> list[dict]:
     """Full-text search across documents using FTS5. Returns matching documents."""
+    safe_query = _sanitize_fts_query(query)
     rows = conn.execute(
         """SELECT d.* FROM document d
            JOIN document_fts ON document_fts.rowid = d.rowid
            WHERE document_fts MATCH ?
            ORDER BY rank""",
-        (query,),
+        (safe_query,),
     ).fetchall()
     return [_enrich_document(conn, dict(r)) for r in rows]
 
