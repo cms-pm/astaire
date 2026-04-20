@@ -35,11 +35,12 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show knowledge base status (L0 summary)."""
+    from src.lint import check_l0_staleness
     from src.project import generate_l0, read_l0
 
     with managed_connection(args.db) as conn:
         l0 = read_l0(conn)
-        if l0 is None:
+        if l0 is None or check_l0_staleness(conn, fix=False):
             l0 = generate_l0(conn)
         print(l0)
 
@@ -181,6 +182,8 @@ def cmd_prune(args: argparse.Namespace) -> None:
 
 def cmd_sync(args: argparse.Namespace) -> None:
     """Check all registered documents for drift."""
+    from src.lint import check_l0_staleness
+    from src.project import generate_l0, read_l0
     from src.registry import sync_all, sync_collection
 
     with managed_connection(args.db) as conn:
@@ -188,6 +191,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
             changes = sync_collection(conn, args.collection)
         else:
             changes = sync_all(conn)
+
+        if changes or read_l0(conn) is None or check_l0_staleness(conn, fix=False):
+            generate_l0(conn)
 
         if not changes:
             print("All documents up to date.")
@@ -203,6 +209,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 def cmd_startup(args: argparse.Namespace) -> None:
     """Session startup checklist: init if needed, scan, sync, status."""
     from src.collections.discovery import register_all_collections, scan_all_collections
+    from src.lint import check_l0_staleness
     from src.project import generate_l0, read_l0
     from src.registry import sync_all
 
@@ -232,7 +239,7 @@ def cmd_startup(args: argparse.Namespace) -> None:
 
         # 4. Check L0 freshness and regenerate if needed
         l0 = read_l0(conn)
-        if l0 is None:
+        if new_docs or changes or l0 is None or check_l0_staleness(conn, fix=False):
             l0 = generate_l0(conn)
 
         # 5. Print status
@@ -266,6 +273,63 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             print(f"  Entities created: {result['entities_created']}")
             print(f"  Claims created: {result['claims_created']}")
             print(f"  Contradictions found: {result['contradictions_found']}")
+
+
+def cmd_graphify_import(args: argparse.Namespace) -> None:
+    """Import graphify output into the claim store."""
+    from src.governance import load_contract_registry_path, load_graphify_config
+    from src.ingest_graphify import import_graphify
+
+    root = Path(args.root).resolve()
+    graphify_config = load_graphify_config(root)
+
+    graph_path = Path(args.graph) if args.graph else root / "graphify-out" / "graph.json"
+    threshold = args.threshold or graphify_config.get("promotionThreshold", "p90")
+    floor = args.floor if args.floor is not None else graphify_config.get("promotionFloor", 3)
+    ceiling = args.ceiling if args.ceiling is not None else graphify_config.get("promotionCeiling", 100)
+    pinned_nodes = args.pinned_node or graphify_config.get("pinnedNodes") or []
+    inferred_edge_threshold = (
+        args.inferred_edge_threshold
+        if args.inferred_edge_threshold is not None
+        else graphify_config.get("inferredEdgeThreshold")
+    )
+    auto_tune = args.auto_tune or bool(graphify_config.get("autoTune", False))
+    annotate_approval_status = (
+        args.annotate_approval_status
+        or bool(graphify_config.get("annotateApprovalStatus", False))
+    )
+    contract_registry_path = args.contract_registry or load_contract_registry_path(root)
+
+    with managed_connection(args.db) as conn:
+        result = import_graphify(
+            conn,
+            graph_json_path=graph_path,
+            threshold=threshold,
+            floor=floor,
+            ceiling=ceiling,
+            pinned_nodes=pinned_nodes,
+            inferred_edge_threshold=inferred_edge_threshold,
+            source_repo=graphify_config.get("sourceRepoTag"),
+            cross_repo_authority=graphify_config.get("crossRepoAuthority") or [],
+            annotate_approval_status=annotate_approval_status,
+            contract_registry_path=contract_registry_path,
+            auto_tune=auto_tune,
+            l0_token_budget=args.l0_budget,
+        )
+
+    state = "no-op" if result["duplicate"] else "applied"
+    print(f"Graphify import: {result['graph_version']} ({state})")
+    print(f"  Selected nodes: {result['selected_nodes']}")
+    print(f"  Effective threshold: {result['effective_threshold']}")
+    print(f"  Entities created: {result['entities_created']}")
+    print(f"  Relationships created: {result['relationships_created']}")
+    print(f"  Relationships updated: {result['relationships_updated']}")
+    print(f"  Relationships removed: {result['relationships_removed']}")
+    print(f"  Claims created: {result['claims_created']}")
+    print(f"  Claims updated: {result['claims_updated']}")
+    print(f"  Claims superseded: {result['claims_superseded']}")
+    print(f"  Skipped inferred: {result['skipped_inferred']}")
+    print(f"  Skipped ambiguous: {result['skipped_ambiguous']}")
 
 
 # ── Parser ───────────────────────────────────────────────────────
@@ -332,6 +396,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--source-type", default="note", help="Source type (default: note)")
     p_ingest.add_argument("--claims", help="Path to JSON file with pre-extracted claims")
 
+    # graphify-import
+    p_graph = sub.add_parser("graphify-import", help="Import graphify graph output")
+    p_graph.add_argument("--root", default=".", help="Project root directory")
+    p_graph.add_argument("--graph", help="Path to graph.json (default: <root>/graphify-out/graph.json)")
+    p_graph.add_argument("--threshold", help="Promotion threshold, e.g. p90 or absolute:12")
+    p_graph.add_argument("--floor", type=int, help="Promotion floor")
+    p_graph.add_argument("--ceiling", type=int, help="Promotion ceiling")
+    p_graph.add_argument("--pinned-node", action="append", help="Pinned node id, repeatable")
+    p_graph.add_argument("--inferred-edge-threshold", type=float, help="Admit inferred edges at or above this score")
+    p_graph.add_argument("--annotate-approval-status", action="store_true", help="Emit approval_status claims when registry data exists")
+    p_graph.add_argument("--contract-registry", help="Optional path to contract registry JSON/YAML")
+    p_graph.add_argument("--auto-tune", action="store_true", help="Auto-tune selected node count to fit the L0 token budget")
+    p_graph.add_argument("--l0-budget", type=int, default=2000, help="Target L0 token budget when auto-tuning")
+
     return parser
 
 
@@ -357,6 +435,7 @@ def main() -> None:
         "prune": cmd_prune,
         "sync": cmd_sync,
         "ingest": cmd_ingest,
+        "graphify-import": cmd_graphify_import,
     }
 
     try:
