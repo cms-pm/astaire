@@ -45,52 +45,19 @@ def prune_expired_claims(
     affected_cluster_ids = [r["cluster_id"] for r in affected_clusters]
 
     with transaction(conn) as cur:
-        # Delete claim_cluster rows for expired claims
+        # Delete claim_cluster rows for expired claims first so cluster counts
+        # can be recomputed from the surviving assignments.
         clusters_cleaned = cur.execute(
             f"DELETE FROM claim_cluster WHERE claim_id IN ({placeholders})",
             expired_ids,
         ).rowcount
 
-        # Clean up FTS5 index before deleting claims.
-        # The schema uses contentless FTS5 (content=''), which requires the
-        # special 'delete' command syntax instead of regular DELETE.
-        # We handle this explicitly and drop the trigger temporarily.
-        for row in expired:
-            claim_row = cur.execute(
-                """SELECT c.predicate, c.value, e.canonical_name
-                   FROM claim c JOIN entity e ON e.entity_id = c.entity_id
-                   WHERE c.claim_id = ?""",
-                (row["claim_id"],),
-            ).fetchone()
-            if claim_row:
-                # Get the rowid for the claim
-                rid = cur.execute(
-                    "SELECT rowid FROM claim WHERE claim_id = ?",
-                    (row["claim_id"],),
-                ).fetchone()
-                if rid:
-                    cur.execute(
-                        "INSERT INTO claim_fts(claim_fts, rowid, predicate, value, entity_name) "
-                        "VALUES('delete', ?, ?, ?, ?)",
-                        (rid[0], claim_row["predicate"], claim_row["value"],
-                         claim_row["canonical_name"]),
-                    )
-
-        # Drop the broken trigger, delete claims, then recreate it
-        cur.execute("DROP TRIGGER IF EXISTS trg_claim_fts_delete")
+        # The schema maintains claim_fts through ordinary DELETE triggers, so a
+        # direct claim delete keeps the index in sync without special handling.
         cur.execute(
             f"DELETE FROM claim WHERE claim_id IN ({placeholders})",
             expired_ids,
         )
-        # Recreate the trigger (using correct contentless syntax would be ideal
-        # but we keep the original schema trigger for compatibility — it only
-        # fires on direct DELETEs which prune handles explicitly above)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS trg_claim_fts_delete AFTER DELETE ON claim
-            BEGIN
-                DELETE FROM claim_fts WHERE rowid = OLD.rowid;
-            END
-        """)
 
         # Update topic_cluster.claim_count for affected clusters
         for cid in affected_cluster_ids:
