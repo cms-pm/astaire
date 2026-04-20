@@ -88,6 +88,9 @@ def _normalize_tags(
     result: dict[str, str | list[str]] = {}
     for key, values in tags.items():
         nkey = key.lower()
+        if nkey == "routing_hint":
+            result[nkey] = values
+            continue
         if isinstance(values, str):
             result[nkey] = values.lower()
         else:

@@ -69,6 +69,7 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
            LEFT JOIN document d ON d.collection_id = c.collection_id
                AND d.status NOT IN ('superseded', 'archived')
            GROUP BY c.collection_id
+           HAVING COUNT(d.document_id) > 0
            ORDER BY doc_count DESC"""
     ).fetchall()
     for row in col_rows:
@@ -92,6 +93,21 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
             f"- **{row['label']}**: {summary} — {row['claim_count']} claims, last updated {row['updated_at']}"
         )
     topic_section = "\n".join(topic_lines) if topic_lines else "- (none)"
+
+    # Routing hints (from graphify-outputs and any other collection with routing_hint tags)
+    routing_rows = conn.execute(
+        """SELECT DISTINCT dt.tag_value
+           FROM document_tag dt
+           JOIN document d ON d.document_id = dt.document_id
+           WHERE dt.tag_key = 'routing_hint'
+             AND d.status NOT IN ('superseded', 'archived')
+           ORDER BY dt.tag_value"""
+    ).fetchall()
+    routing_section = (
+        "\n".join(row["tag_value"] for row in routing_rows)
+        if routing_rows
+        else ""
+    )
 
     # Open contradictions
     contra_lines = []
@@ -123,6 +139,8 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
         "SELECT created_at FROM ingest_log WHERE operation = 'lint' ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
 
+    routing_block = f"\n## Routing hints\n{routing_section}\n" if routing_section else ""
+
     content = f"""# Knowledge base state — {now}
 
 ## Entity registry ({entity_count} entities)
@@ -130,7 +148,7 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
 
 ## Document registry ({document_count} documents across {collection_count} collections)
 {doc_section}
-
+{routing_block}
 ## Hot topics
 {topic_section}
 
