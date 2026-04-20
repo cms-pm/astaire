@@ -5,6 +5,7 @@ db/*.db-shm
 
 # Generated wiki (read-only export)
 wiki/
+src/graphify-out/
 
 # Python
 __pycache__/

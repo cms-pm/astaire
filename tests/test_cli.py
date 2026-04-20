@@ -21,6 +21,7 @@ from src.cli import (
     cmd_prune,
     cmd_query,
     cmd_scan,
+    cmd_status,
     cmd_startup,
     cmd_sync,
     build_parser,
@@ -182,6 +183,33 @@ class TestStartup:
 
         # Second run should not report new documents
         assert "new document(s) registered" not in second
+
+
+class TestStatus:
+    def test_status_regenerates_stale_l0(self, tmp_path, sample_project, capsys):
+        db_path = str(tmp_path / "status.db")
+        cmd_startup(_args(db=db_path, root=str(sample_project)))
+        capsys.readouterr()
+
+        conn = get_connection(db_path)
+        conn.execute(
+            """UPDATE projection_cache
+               SET content_md = ?, content_hash = ?
+               WHERE tier = 'L0' AND scope_key = 'global'""",
+            ("# stale\n", "stale-hash"),
+        )
+        conn.commit()
+        conn.close()
+        cmd_status(_args(db=db_path))
+        out = capsys.readouterr().out
+        assert "Knowledge base state" in out
+
+        conn = get_connection(db_path)
+        fresh_hash = conn.execute(
+            "SELECT content_hash FROM projection_cache WHERE tier = 'L0' AND scope_key = 'global'"
+        ).fetchone()["content_hash"]
+        conn.close()
+        assert fresh_hash != "stale-hash"
 
 
 # ── Scan ─────────────────────────────────────────────────────────
@@ -436,6 +464,13 @@ class TestSync:
         cmd_sync(_args(db=db_path, collection=None))
         out = capsys.readouterr().out
         assert "All documents up to date" in out
+
+        conn = get_connection(db_path)
+        l0 = conn.execute(
+            "SELECT content_md FROM projection_cache WHERE tier = 'L0' AND scope_key = 'global'"
+        ).fetchone()
+        conn.close()
+        assert l0 is not None
 
     def test_sync_detects_modified(self, sync_db, capsys):
         db_path, project = sync_db
