@@ -52,6 +52,7 @@ COLLECTION_CONFIG = {
         "chunk",
         "phase",
         "risk_tier",
+        "bundle_type",
     ],
     "statuses": [
         "draft",
@@ -74,11 +75,16 @@ SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
     ("docs/planning/phase-", "risk-log", {"stage_produced": "plan"}),
     ("docs/planning/board/board-selection-", "board-selection", {"stage_produced": "plan"}),
     ("docs/planning/board/committee-review-packet-", "board-packet", {"stage_produced": "board-review"}),
+    ("docs/planning/board/board-composition-approval-", "board-decision", {"stage_produced": "board-review"}),
+    ("docs/planning/board/committee-opportunity-register-", "board-packet", {"stage_produced": "board-review"}),
     ("docs/planning/board/committee-virtual-meeting-", "meeting-record", {"stage_produced": "board-review"}),
     ("docs/planning/board/members/", "board-member-profile", {"stage_produced": "plan"}),
-    ("docs/plan/implementation-plan.md", "implementation-plan", {"stage_produced": "plan"}),
+    ("docs/planning/implementation-plan.md", "implementation-plan", {"stage_produced": "plan"}),
     ("docs/governance/exceptions.yaml", "exception-registry", {}),
     ("governance.yaml", "governance-manifest", {"stage_produced": "ingest"}),
+    ("docs/releases/astaire/", "validation-evidence", {"stage_produced": "release", "bundle_type": "astaire"}),
+    ("docs/releases/rtk/", "validation-evidence", {"stage_produced": "release", "bundle_type": "rtk"}),
+    ("docs/releases/bootstrap/", "validation-evidence", {"stage_produced": "release", "bundle_type": "bootstrap"}),
 ]
 
 
@@ -125,20 +131,20 @@ def scan_and_register(
 
     for rule_pattern, doc_type, base_tags in SCAN_RULES:
         full_pattern = root / rule_pattern
-        parent = full_pattern.parent if not full_pattern.is_dir() else full_pattern
 
-        if full_pattern.name and not full_pattern.is_dir():
-            # Specific file or prefix match
-            if str(rule_pattern).endswith("/"):
-                # Directory pattern — glob everything in it
-                files = sorted(parent.glob("*")) if parent.exists() else []
-            else:
-                # Prefix or exact match
-                prefix = full_pattern.name
-                files = sorted(f for f in parent.glob(f"{prefix}*") if f.is_file()) if parent.exists() else []
+        if str(rule_pattern).endswith("/"):
+            # Explicit directory pattern: only glob if the directory actually exists.
+            # Previously the code fell back to globbing the parent when the dir was
+            # absent, incorrectly registering sibling files under the wrong doc_type.
+            files = sorted(full_pattern.glob("*")) if full_pattern.is_dir() else []
+        elif full_pattern.is_dir():
+            # Pattern resolved to a directory (no trailing slash but is a dir)
+            files = sorted(full_pattern.glob("*"))
         else:
-            # Directory pattern
-            files = sorted(full_pattern.glob("*")) if full_pattern.exists() else []
+            # Prefix or exact filename match inside the parent directory
+            parent = full_pattern.parent
+            prefix = full_pattern.name
+            files = sorted(f for f in parent.glob(f"{prefix}*") if f.is_file()) if parent.exists() else []
 
         for filepath in files:
             if not filepath.is_file():
