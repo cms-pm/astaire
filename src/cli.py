@@ -35,11 +35,12 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show knowledge base status (L0 summary)."""
+    from src.lint import check_l0_staleness
     from src.project import generate_l0, read_l0
 
     with managed_connection(args.db) as conn:
         l0 = read_l0(conn)
-        if l0 is None:
+        if l0 is None or check_l0_staleness(conn, fix=False):
             l0 = generate_l0(conn)
         print(l0)
 
@@ -181,6 +182,8 @@ def cmd_prune(args: argparse.Namespace) -> None:
 
 def cmd_sync(args: argparse.Namespace) -> None:
     """Check all registered documents for drift."""
+    from src.lint import check_l0_staleness
+    from src.project import generate_l0, read_l0
     from src.registry import sync_all, sync_collection
 
     with managed_connection(args.db) as conn:
@@ -188,6 +191,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
             changes = sync_collection(conn, args.collection)
         else:
             changes = sync_all(conn)
+
+        if changes or read_l0(conn) is None or check_l0_staleness(conn, fix=False):
+            generate_l0(conn)
 
         if not changes:
             print("All documents up to date.")
@@ -203,6 +209,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
 def cmd_startup(args: argparse.Namespace) -> None:
     """Session startup checklist: init if needed, scan, sync, status."""
     from src.collections.discovery import register_all_collections, scan_all_collections
+    from src.lint import check_l0_staleness
     from src.project import generate_l0, read_l0
     from src.registry import sync_all
 
@@ -232,7 +239,7 @@ def cmd_startup(args: argparse.Namespace) -> None:
 
         # 4. Check L0 freshness and regenerate if needed
         l0 = read_l0(conn)
-        if l0 is None:
+        if new_docs or changes or l0 is None or check_l0_staleness(conn, fix=False):
             l0 = generate_l0(conn)
 
         # 5. Print status
