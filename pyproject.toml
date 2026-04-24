@@ -1,6 +1,6 @@
 [project]
 name = "astaire"
-version = "0.3.0"
+version = "0.3.1"
 description = "Hybrid memory palace — structured knowledge store for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
