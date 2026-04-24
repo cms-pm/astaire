@@ -133,13 +133,12 @@ def scan_and_register(
         full_pattern = root / rule_pattern
 
         if str(rule_pattern).endswith("/"):
-            # Explicit directory pattern: only glob if the directory actually exists.
-            # Previously the code fell back to globbing the parent when the dir was
-            # absent, incorrectly registering sibling files under the wrong doc_type.
-            files = sorted(full_pattern.glob("*")) if full_pattern.is_dir() else []
+            # Explicit directory patterns should recurse so nested chunk trees and
+            # board/member directories are discoverable in downstream repos.
+            files = _glob_dir_recursive(full_pattern)
         elif full_pattern.is_dir():
-            # Pattern resolved to a directory (no trailing slash but is a dir)
-            files = sorted(full_pattern.glob("*"))
+            # Pattern resolved to a directory (no trailing slash but is a dir).
+            files = _glob_dir_recursive(full_pattern)
         else:
             # Prefix or exact filename match inside the parent directory
             parent = full_pattern.parent
@@ -179,8 +178,66 @@ def scan_and_register(
                 "title": title,
             })
 
+    for filepath, doc_type, base_tags in _scan_governance_board(root):
+        path_str = str(filepath)
+        if path_str in existing_paths:
+            continue
+
+        tags = dict(base_tags)
+        external_id = _extract_external_id(filepath, doc_type)
+        _extract_phase_chunk_tags(filepath, tags)
+        title = _derive_title(filepath, doc_type)
+
+        doc_id = register_document(
+            conn,
+            COLLECTION_NAME,
+            filepath,
+            doc_type,
+            title,
+            tags=tags if tags else None,
+            external_id=external_id,
+            status="active",
+        )
+        existing_paths.add(path_str)
+        registered.append({
+            "document_id": doc_id,
+            "file_path": path_str,
+            "doc_type": doc_type,
+            "title": title,
+        })
+
     logger.info("Scanned and registered %d new documents in %s", len(registered), COLLECTION_NAME)
     return registered
+
+
+def _glob_dir_recursive(directory: Path) -> list[Path]:
+    """Return all files under a directory, excluding hidden paths."""
+    if not directory.is_dir():
+        return []
+    return sorted(
+        f for f in directory.rglob("*")
+        if f.is_file() and not any(part.startswith(".") for part in f.parts)
+    )
+
+
+def _scan_governance_board(root: Path) -> list[tuple[Path, str, dict[str, str]]]:
+    """Classify project board artifacts under docs/governance/board."""
+    board_dir = root / "docs" / "governance" / "board"
+    if not board_dir.is_dir():
+        return []
+
+    staged_files: list[tuple[Path, str, dict[str, str]]] = []
+    for filepath in _glob_dir_recursive(board_dir):
+        name = filepath.stem
+        if name.endswith("meeting-minutes"):
+            staged_files.append((filepath, "meeting-record", {"stage_produced": "board-review"}))
+        elif name.endswith("review-packet"):
+            staged_files.append((filepath, "board-packet", {"stage_produced": "board-review"}))
+        elif name.endswith("followup-note") or name.endswith("decision-note") or name.endswith("note"):
+            staged_files.append((filepath, "board-decision", {"stage_produced": "board-review"}))
+        elif name.endswith("memo") or "handoff-memo" in name:
+            staged_files.append((filepath, "implementation-handoff", {"stage_produced": "board-review"}))
+    return staged_files
 
 
 def _extract_external_id(filepath: Path, doc_type: str) -> str | None:
