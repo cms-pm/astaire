@@ -559,7 +559,7 @@ This project uses **uv** for dependency management and virtual environment.
 
 **Rules:**
 
-- **Always use `uv run`** to execute Python commands: `uv run pytest`, `uv run python -m src.registry`, etc. This ensures the `.venv` is active and dependencies are resolved. Never call bare `python` or `python3`.
+- **Always use `./.astaire/uv run`** to execute Python commands: `./.astaire/uv run pytest`, `./.astaire/uv run python -m src.registry`, etc. This keeps the cache under `.astaire/.uv-cache`, ensures the `.venv` is active, and avoids writes to `~/.cache/uv`. Never call bare `python` or `python3`.
 - **Adding dependencies:** `uv add <package>` for runtime deps, `uv add --dev <package>` for dev/test deps.
 - **Lock file:** `uv.lock` is checked into git. Run `uv sync` if it's out of date.
 - **Python version:** 3.11+ (pinned in `pyproject.toml`).
@@ -619,7 +619,7 @@ Astaire is **single-writer by design**. SQLite WAL mode allows concurrent reads 
 **Manual fallback** (if hooks are disabled or for debugging):
 
 ```bash
-uv run astaire startup --root .
+./.astaire/uv run astaire startup --root .
 ```
 
 This single command does:
@@ -635,18 +635,19 @@ This single command does:
 
 | Command | Purpose |
 |---|---|
-| `uv run astaire startup` | Full session startup checklist |
-| `uv run astaire status` | Print L0 summary |
-| `uv run astaire scan` | Register new collection artifacts |
-| `uv run astaire sync` | Detect file drift |
-| `uv run astaire query -c my-collection -t spec` | Query by collection/type |
-| `uv run astaire query --tag chunk=1.2` | Query by tag |
-| `uv run astaire query --fts "keyword"` | Full-text search |
-| `uv run astaire context --tag chunk=1.2` | Assemble context for LLM |
-| `uv run astaire lint --fix` | Health checks with auto-fix |
-| `uv run astaire export` | Generate wiki |
-| `uv run astaire prune` | Remove expired claims |
-| `uv run astaire ingest FILE --title "..."` | Ingest a source document |
+| `./.astaire/uv run astaire startup` | Full session startup checklist |
+| `./.astaire/uv run astaire doctor` | Check DB/schema/tokenizer readiness |
+| `./.astaire/uv run astaire status` | Print L0 summary |
+| `./.astaire/uv run astaire scan` | Register new collection artifacts |
+| `./.astaire/uv run astaire sync` | Detect file drift |
+| `./.astaire/uv run astaire query -c my-collection -t spec` | Query by collection/type |
+| `./.astaire/uv run astaire query --tag chunk=1.2` | Query by tag |
+| `./.astaire/uv run astaire query --fts "keyword"` | Full-text search |
+| `./.astaire/uv run astaire context --tag chunk=1.2` | Assemble context for LLM |
+| `./.astaire/uv run astaire lint --fix` | Health checks with auto-fix |
+| `./.astaire/uv run astaire export` | Generate wiki |
+| `./.astaire/uv run astaire prune` | Remove expired claims |
+| `./.astaire/uv run astaire ingest FILE --title "..."` | Ingest a source document |
 
 ---
 

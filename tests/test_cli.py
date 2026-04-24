@@ -13,6 +13,7 @@ import pytest
 
 from src.cli import (
     cmd_context,
+    cmd_doctor,
     cmd_export,
     cmd_graphify_import,
     cmd_init,
@@ -210,6 +211,70 @@ class TestStatus:
         ).fetchone()["content_hash"]
         conn.close()
         assert fresh_hash != "stale-hash"
+
+
+class TestDoctor:
+    def test_doctor_reports_healthy_runtime(self, tmp_db, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "src.utils.tokens.check_tokenizer_health",
+            lambda encoding="cl100k_base": {
+                "ok": True,
+                "encoding": encoding,
+                "message": f"Tokenizer encoding '{encoding}' is ready.",
+                "approx_tokens_enabled": True,
+            },
+        )
+        cmd_doctor(_args(db=tmp_db))
+        out = capsys.readouterr().out
+        assert "[PASS] Database schema initialized" in out
+        assert "[PASS] Tokenizer encoding 'cl100k_base' is ready." in out
+
+    def test_doctor_reports_missing_schema_as_warning(self, tmp_path, monkeypatch, capsys):
+        db_path = str(tmp_path / "empty.db")
+        Path(db_path).touch()
+        monkeypatch.setattr(
+            "src.utils.tokens.check_tokenizer_health",
+            lambda encoding="cl100k_base": {
+                "ok": True,
+                "encoding": encoding,
+                "message": f"Tokenizer encoding '{encoding}' is ready.",
+                "approx_tokens_enabled": True,
+            },
+        )
+        cmd_doctor(_args(db=db_path))
+        out = capsys.readouterr().out
+        assert "[WARN] Database schema incomplete or not initialized" in out
+
+    def test_doctor_fails_when_database_directory_missing(self, tmp_path, monkeypatch, capsys):
+        db_path = str(tmp_path / "missing" / "doctor.db")
+        monkeypatch.setattr(
+            "src.utils.tokens.check_tokenizer_health",
+            lambda encoding="cl100k_base": {
+                "ok": True,
+                "encoding": encoding,
+                "message": f"Tokenizer encoding '{encoding}' is ready.",
+                "approx_tokens_enabled": True,
+            },
+        )
+        with pytest.raises(SystemExit):
+            cmd_doctor(_args(db=db_path))
+        out = capsys.readouterr().out
+        assert "[FAIL] Database directory missing" in out
+
+    def test_doctor_warns_when_tokenizer_falls_back(self, tmp_db, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "src.utils.tokens.check_tokenizer_health",
+            lambda encoding="cl100k_base": {
+                "ok": False,
+                "encoding": encoding,
+                "message": "Tokenizer encoding 'cl100k_base' is unavailable.",
+                "approx_tokens_enabled": True,
+            },
+        )
+        cmd_doctor(_args(db=tmp_db))
+        out = capsys.readouterr().out
+        assert "[WARN] Tokenizer encoding 'cl100k_base' is unavailable." in out
+        assert "Approximate token fallback is enabled" in out
 
 
 # ── Scan ─────────────────────────────────────────────────────────
@@ -791,3 +856,14 @@ class TestConnectionCleanup:
         ).fetchall()]
         assert "entity" in tables
         conn2.close()
+
+
+class TestCLIParser:
+    def test_parser_shows_help_for_missing_command(self):
+        parser = build_parser()
+        assert parser.parse_args([]).command is None
+
+    def test_parser_accepts_doctor(self):
+        parser = build_parser()
+        args = parser.parse_args(["doctor"])
+        assert args.command == "doctor"

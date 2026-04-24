@@ -45,6 +45,60 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(l0)
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Check runtime readiness and common failure modes."""
+    from src.utils import tokens
+
+    db_target = Path(args.db).resolve() if args.db else DB_PATH
+    db_dir = db_target.parent
+    failures = 0
+
+    if db_dir.exists():
+        print(f"[PASS] Database directory exists: {db_dir}")
+    else:
+        print(f"[FAIL] Database directory missing: {db_dir}")
+        failures += 1
+
+    schema_ok = False
+    try:
+        with managed_connection(args.db) as conn:
+            required_tables = {"collection", "document", "entity", "source", "claim"}
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            present = {row[0] for row in rows}
+            missing = sorted(required_tables - present)
+            schema_ok = not missing
+            if schema_ok:
+                print("[PASS] Database schema initialized")
+            else:
+                print("[WARN] Database schema incomplete or not initialized")
+                print("       Run 'astaire init' or 'astaire startup' to create the schema.")
+    except SystemExit as exc:
+        print(str(exc))
+        failures += 1
+    except sqlite3.Error as exc:
+        print(f"[FAIL] Database connection failed: {exc}")
+        failures += 1
+
+    tokenizer = tokens.check_tokenizer_health()
+    if tokenizer["ok"]:
+        print(f"[PASS] {tokenizer['message']}")
+    else:
+        status = "WARN" if tokenizer["approx_tokens_enabled"] else "FAIL"
+        print(f"[{status}] {tokenizer['message']}")
+        if tokenizer["approx_tokens_enabled"]:
+            print("       Approximate token fallback is enabled; exact ingest budgets are degraded.")
+        else:
+            failures += 1
+
+    approx_state = "enabled" if tokenizer["approx_tokens_enabled"] else "disabled"
+    print(f"[INFO] Approximate token fallback: {approx_state}")
+
+    if failures:
+        raise SystemExit(1)
+
+
 def cmd_scan(args: argparse.Namespace) -> None:
     """Scan and register collection artifacts."""
     from src.collections.discovery import (
@@ -354,6 +408,9 @@ def build_parser() -> argparse.ArgumentParser:
     # status
     sub.add_parser("status", help="Show knowledge base status")
 
+    # doctor
+    sub.add_parser("doctor", help="Check runtime readiness and common failure causes")
+
     # scan
     p_scan = sub.add_parser("scan", help="Scan and register collection artifacts")
     p_scan.add_argument("--root", default=".", help="Project root directory")
@@ -427,6 +484,7 @@ def main() -> None:
         "init": cmd_init,
         "startup": cmd_startup,
         "status": cmd_status,
+        "doctor": cmd_doctor,
         "scan": cmd_scan,
         "query": cmd_query,
         "context": cmd_context,
