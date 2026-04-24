@@ -18,50 +18,57 @@ These are measured results from the `ai-dev-governance` dogfood workspace on `v0
 ```bash
 git clone <repo-url> astaire
 cd astaire
-uv sync
+./.astaire/uv sync
 ```
 
 Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/).
+
+Astaire keeps its `uv` cache inside the repo by default. Use `./.astaire/uv ...`
+for local development so cache and bootstrap writes stay under `.astaire/.uv-cache`
+instead of `~/.cache/uv`.
 
 ## Quick Start
 
 ```bash
 # Initialize the database
-uv run astaire init
+./.astaire/uv run astaire init
 
 # Scan and register collection artifacts
-uv run astaire scan --root .
+./.astaire/uv run astaire scan --root .
 
 # Session startup (init + scan + sync + status)
-uv run astaire startup --root .
+./.astaire/uv run astaire startup --root .
+
+# Doctor catches bootstrap/runtime readiness issues
+./.astaire/uv run astaire doctor
 
 # Query documents by collection, type, or tag
-uv run astaire query -c my-collection
-uv run astaire query -t gherkin
-uv run astaire query --tag phase=1
+./.astaire/uv run astaire query -c my-collection
+./.astaire/uv run astaire query -t gherkin
+./.astaire/uv run astaire query --tag phase=1
 
 # Full-text search
-uv run astaire query --fts "keyword"
+./.astaire/uv run astaire query --fts "keyword"
 
 # Assemble context for LLM consumption (with token budget)
-uv run astaire context -c my-collection --budget 4000
-uv run astaire context --tag chunk=1.2
+./.astaire/uv run astaire context -c my-collection --budget 4000
+./.astaire/uv run astaire context --tag chunk=1.2
 
 # Health checks
-uv run astaire lint
-uv run astaire lint --fix
+./.astaire/uv run astaire lint
+./.astaire/uv run astaire lint --fix
 
 # Export wiki (Obsidian-compatible markdown)
-uv run astaire export
+./.astaire/uv run astaire export
 
 # Prune expired claims
-uv run astaire prune
+./.astaire/uv run astaire prune
 
 # Detect file drift
-uv run astaire sync
+./.astaire/uv run astaire sync
 
 # Ingest a source document with claims
-uv run astaire ingest raw/article.md --title "Article Title"
+./.astaire/uv run astaire ingest raw/article.md --title "Article Title"
 ```
 
 ## Architecture
@@ -151,13 +158,13 @@ All commands accept `--db PATH` to use a non-default database and `-v` for verbo
 ### Running
 
 ```bash
-uv run python -m benchmarks.bench_context --db db/memory_palace.db --root .
+./.astaire/uv run python -m benchmarks.bench_context --db db/memory_palace.db --root .
 ```
 
 In restricted or sandboxed environments, set a writable `uv` cache explicitly:
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --project astaire python -m benchmarks.bench_context --db .astaire/memory_palace.db --root .
+./.astaire/uv run --project astaire python -m benchmarks.bench_context --db .astaire/memory_palace.db --root .
 ```
 
 ### Results
@@ -188,13 +195,13 @@ The raw-FS baseline intentionally mimics what a naive agent would do: glob for p
 
 ```bash
 # Run tests
-uv run pytest
+./.astaire/uv run pytest
 
 # Run with verbose output
-uv run pytest -v
+./.astaire/uv run pytest -v
 
 # Run specific module tests
-uv run pytest tests/test_registry.py
+./.astaire/uv run pytest tests/test_registry.py
 ```
 
 ## License

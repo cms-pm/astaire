@@ -3,6 +3,8 @@
 import time
 from pathlib import Path
 
+import pytest
+
 from src.utils import hashing, ulid, tokens
 
 
@@ -90,3 +92,25 @@ class TestTokens:
         result = tokens.truncate_to_budget(text, budget=20)
         assert len(result) > 0
         assert isinstance(result, str)
+
+    def test_count_tokens_falls_back_when_tokenizer_unavailable(self, monkeypatch):
+        monkeypatch.setattr(tokens, "get_encoder", lambda encoding="cl100k_base": (_ for _ in ()).throw(tokens.TokenizerUnavailable("offline")))
+        count = tokens.count_tokens("abcdefgh", allow_approx=True)
+        assert count == 2
+
+    def test_truncate_falls_back_when_tokenizer_unavailable(self, monkeypatch):
+        monkeypatch.setattr(tokens, "get_encoder", lambda encoding="cl100k_base": (_ for _ in ()).throw(tokens.TokenizerUnavailable("offline")))
+        result = tokens.truncate_to_budget("abcdefghij", budget=2, allow_approx=True)
+        assert result == "abcdefgh"
+
+    def test_count_tokens_raises_when_approx_disabled(self, monkeypatch):
+        monkeypatch.setattr(tokens, "get_encoder", lambda encoding="cl100k_base": (_ for _ in ()).throw(tokens.TokenizerUnavailable("offline")))
+        with pytest.raises(tokens.TokenizerUnavailable):
+            tokens.count_tokens("abcdefgh", allow_approx=False)
+
+    def test_check_tokenizer_health_reports_unavailable(self, monkeypatch):
+        monkeypatch.setattr(tokens, "get_encoder", lambda encoding="cl100k_base": (_ for _ in ()).throw(tokens.TokenizerUnavailable("offline")))
+        health = tokens.check_tokenizer_health()
+        assert health["ok"] is False
+        assert health["approx_tokens_enabled"] is True
+        assert "offline" in health["message"]
