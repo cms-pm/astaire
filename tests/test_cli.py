@@ -120,7 +120,7 @@ def sample_project(tmp_path):
 
 def _args(**kwargs):
     """Build a Namespace with defaults."""
-    defaults = {"db": None, "verbose": False}
+    defaults = {"db": None, "verbose": False, "no_sync": False}
     defaults.update(kwargs)
     return Namespace(**defaults)
 
@@ -311,6 +311,53 @@ class TestScan:
         cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
         out = capsys.readouterr().out
         assert "Registered 0 new document(s)" in out
+
+    def test_scan_refreshes_modified_documents(self, tmp_path, sample_project, capsys):
+        """Issue #14: scan must refresh existing documents whose content has
+        changed on disk, not only register new files."""
+        db_path = str(tmp_path / "scan_refresh.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+        capsys.readouterr()
+
+        conn = get_connection(db_path)
+        row = conn.execute("SELECT file_path, content_hash FROM document LIMIT 1").fetchone()
+        target = Path(row["file_path"])
+        old_hash = row["content_hash"]
+        conn.close()
+        assert target.exists()
+
+        original_text = target.read_text(encoding="utf-8")
+        target.write_text(original_text + "\n\n## Appended for issue #14\n", encoding="utf-8")
+
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+        out = capsys.readouterr().out
+        assert "Refreshed" in out
+
+        conn = get_connection(db_path)
+        new_hash = conn.execute(
+            "SELECT content_hash FROM document WHERE file_path = ?", (str(target),)
+        ).fetchone()["content_hash"]
+        conn.close()
+        assert new_hash != old_hash, "scan should refresh content_hash on modified files"
+
+    def test_scan_no_sync_skips_refresh(self, tmp_path, sample_project, capsys):
+        """--no-sync preserves the prior scan-only behavior for callers that
+        want to register without paying for a full-collection rehash."""
+        db_path = str(tmp_path / "scan_no_sync.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+        capsys.readouterr()
+
+        conn = get_connection(db_path)
+        row = conn.execute("SELECT file_path FROM document LIMIT 1").fetchone()
+        target = Path(row["file_path"])
+        conn.close()
+        target.write_text(target.read_text() + "\nedit\n", encoding="utf-8")
+
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None, no_sync=True))
+        out = capsys.readouterr().out
+        assert "Refreshed" not in out
 
 
 # ── Query ────────────────────────────────────────────────────────
