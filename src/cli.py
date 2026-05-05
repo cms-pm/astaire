@@ -100,18 +100,24 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
 
 def cmd_scan(args: argparse.Namespace) -> None:
-    """Scan and register collection artifacts."""
+    """Scan and register collection artifacts.
+
+    Also refreshes existing documents whose on-disk content has changed,
+    so a `scan` after editing a registered file picks up the new
+    content_hash and re-runs FTS triggers on title/external_id/doc_type
+    derivations. Pass --no-sync to disable.
+    """
     from src.collections.discovery import (
         discover_collection_modules,
         register_all_collections,
         scan_all_collections,
     )
+    from src.registry import sync_all, sync_collection
 
     with managed_connection(args.db) as conn:
         root = Path(args.root).resolve()
 
         if args.collection:
-            # Scan a specific collection only
             modules = discover_collection_modules()
             target = [m for m in modules if m.COLLECTION_NAME == args.collection]
             if not target:
@@ -120,13 +126,24 @@ def cmd_scan(args: argparse.Namespace) -> None:
             mod = target[0]
             mod.register_collection(conn)
             results = mod.scan_and_register(conn, root)
+            sync_changes = [] if args.no_sync else sync_collection(conn, args.collection)
         else:
             register_all_collections(conn)
             results = scan_all_collections(conn, root)
+            sync_changes = [] if args.no_sync else sync_all(conn)
 
         print(f"Registered {len(results)} new document(s)")
         for doc in results:
             print(f"  {doc['doc_type']:20s} {doc['title']}")
+
+        if sync_changes:
+            refreshed = [c for c in sync_changes if not c.get("missing")]
+            archived = [c for c in sync_changes if c.get("missing")]
+            print(f"Refreshed {len(refreshed)} modified document(s); archived {len(archived)} missing")
+            for c in refreshed:
+                print(f"  refreshed            {c['title']}")
+            for c in archived:
+                print(f"  archived             {c['title']}")
 
 
 def cmd_query(args: argparse.Namespace) -> None:
@@ -415,6 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan = sub.add_parser("scan", help="Scan and register collection artifacts")
     p_scan.add_argument("--root", default=".", help="Project root directory")
     p_scan.add_argument("-c", "--collection", help="Scan only this collection")
+    p_scan.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Do not refresh existing documents whose content has changed",
+    )
 
     # query
     p_query = sub.add_parser("query", help="Query documents")
