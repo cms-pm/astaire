@@ -31,7 +31,67 @@ def init_db(conn: sqlite3.Connection, schema_path: str | Path | None = None) -> 
     path = Path(schema_path) if schema_path else SCHEMA_PATH
     ddl = path.read_text()
     conn.executescript(ddl)
+    migrate_source_type_taxonomy(conn)
     logger.info("Database schema initialized from %s", path)
+
+
+# Governance-artifact source_type values added in issue #15. An existing DB
+# created before this migration carries the older research-only CHECK
+# constraint and must be rebuilt before governance ingest can succeed.
+_GOVERNANCE_SOURCE_TYPES = ("chunk-plan", "validation", "gherkin", "architecture", "adr", "memo", "contract-test")
+
+
+def migrate_source_type_taxonomy(conn: sqlite3.Connection) -> bool:
+    """Extend source.source_type CHECK constraint with governance-artifact types.
+
+    Idempotent. Returns True if a rebuild ran, False if the schema was already
+    current. SQLite cannot ALTER a CHECK constraint, so when the old constraint
+    is detected we rebuild source via create-new + copy + drop + rename inside
+    a single transaction.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='source'"
+    ).fetchone()
+    if row is None:
+        return False
+    existing_sql = row[0] or ""
+    if "'chunk-plan'" in existing_sql:
+        return False
+
+    conn.execute("BEGIN")
+    try:
+        conn.execute("""
+            CREATE TABLE source__new (
+                source_id     TEXT PRIMARY KEY,
+                title         TEXT NOT NULL,
+                source_type   TEXT NOT NULL CHECK (source_type IN (
+                    'article','paper','transcript','note','code','synthesis',
+                    'chunk-plan','validation','gherkin','architecture','adr','memo','contract-test'
+                )),
+                content_hash  TEXT NOT NULL,
+                file_path     TEXT,
+                media_type    TEXT DEFAULT 'text/markdown',
+                token_count   INTEGER DEFAULT 0,
+                ingested_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                metadata_json TEXT DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            INSERT INTO source__new
+                (source_id, title, source_type, content_hash, file_path,
+                 media_type, token_count, ingested_at, metadata_json)
+            SELECT source_id, title, source_type, content_hash, file_path,
+                   media_type, token_count, ingested_at, metadata_json
+            FROM source
+        """)
+        conn.execute("DROP TABLE source")
+        conn.execute("ALTER TABLE source__new RENAME TO source")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    logger.info("Migrated source.source_type CHECK constraint with governance types")
+    return True
 
 
 @contextmanager
