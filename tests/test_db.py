@@ -2,7 +2,7 @@
 
 import sqlite3
 
-from src.db import get_connection, init_db, transaction
+from src.db import get_connection, init_db, migrate_source_type_taxonomy, transaction
 
 
 class TestConnection:
@@ -71,6 +71,97 @@ class TestInitDB:
         row = db_conn.execute("SELECT operation, documents_registered FROM ingest_log").fetchone()
         assert row["operation"] == "register"
         assert row["documents_registered"] == 1
+
+
+class TestSourceTypeTaxonomyMigration:
+    """Issue #15 — source_type CHECK constraint extension with governance types."""
+
+    _OLD_DDL = """
+        CREATE TABLE source (
+            source_id     TEXT PRIMARY KEY,
+            title         TEXT NOT NULL,
+            source_type   TEXT NOT NULL CHECK (source_type IN (
+                'article','paper','transcript','note','code','synthesis'
+            )),
+            content_hash  TEXT NOT NULL,
+            file_path     TEXT,
+            media_type    TEXT DEFAULT 'text/markdown',
+            token_count   INTEGER DEFAULT 0,
+            ingested_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+            metadata_json TEXT DEFAULT '{}'
+        )
+    """
+
+    def _legacy_db(self):
+        conn = get_connection(":memory:")
+        conn.executescript(self._OLD_DDL)
+        return conn
+
+    def test_legacy_db_rejects_governance_type_before_migration(self):
+        conn = self._legacy_db()
+        from src.utils.ulid import generate
+        try:
+            conn.execute(
+                "INSERT INTO source (source_id, title, source_type, content_hash) "
+                "VALUES (?, 'plan', 'chunk-plan', 'h')",
+                (generate(),),
+            )
+            raised = False
+        except sqlite3.IntegrityError:
+            raised = True
+        assert raised
+        conn.close()
+
+    def test_migration_rebuilds_and_preserves_rows(self):
+        conn = self._legacy_db()
+        from src.utils.ulid import generate
+
+        sid = generate()
+        conn.execute(
+            "INSERT INTO source (source_id, title, source_type, content_hash) "
+            "VALUES (?, 'note-1', 'note', 'h1')",
+            (sid,),
+        )
+        conn.commit()
+
+        ran = migrate_source_type_taxonomy(conn)
+        assert ran is True
+
+        row = conn.execute(
+            "SELECT title, source_type FROM source WHERE source_id = ?", (sid,)
+        ).fetchone()
+        assert row["title"] == "note-1"
+        assert row["source_type"] == "note"
+
+        conn.execute(
+            "INSERT INTO source (source_id, title, source_type, content_hash) "
+            "VALUES (?, 'plan', 'chunk-plan', 'h2')",
+            (generate(),),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_migration_is_idempotent(self):
+        conn = self._legacy_db()
+        assert migrate_source_type_taxonomy(conn) is True
+        assert migrate_source_type_taxonomy(conn) is False
+        conn.close()
+
+    def test_migration_noop_on_fresh_init_db(self, db_conn):
+        assert migrate_source_type_taxonomy(db_conn) is False
+
+    def test_init_db_upgrades_legacy_schema(self):
+        conn = self._legacy_db()
+        init_db(conn)
+        from src.utils.ulid import generate
+        for stype in ("chunk-plan", "validation", "gherkin", "architecture", "adr", "memo", "contract-test"):
+            conn.execute(
+                "INSERT INTO source (source_id, title, source_type, content_hash) "
+                "VALUES (?, ?, ?, ?)",
+                (generate(), f"t-{stype}", stype, "h"),
+            )
+        conn.commit()
+        conn.close()
 
 
 class TestTransaction:

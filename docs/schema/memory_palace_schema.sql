@@ -38,7 +38,12 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS source (
     source_id     TEXT PRIMARY KEY,   -- ULID
     title         TEXT NOT NULL,
-    source_type   TEXT NOT NULL CHECK (source_type IN ('article','paper','transcript','note','code','synthesis')),
+    source_type   TEXT NOT NULL CHECK (source_type IN (
+        -- research-corpus types
+        'article','paper','transcript','note','code','synthesis',
+        -- governance-artifact types (issue #15)
+        'chunk-plan','validation','gherkin','architecture','adr','memo','contract-test'
+    )),
     content_hash  TEXT NOT NULL,       -- SHA-256 of raw content
     file_path     TEXT,                -- path to raw file on disk
     media_type    TEXT DEFAULT 'text/markdown',
