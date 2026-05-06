@@ -57,6 +57,10 @@ class TestScanAndRegister:
         assert by_id["SCN-A"]["status"] == "passing"
         assert by_id["SCN-A"]["predicate_hash"] == "h2"
         assert by_id["SCN-B"]["status"] == "expected-fail"
+        for row in result:
+            assert "doc_type" in row and row["doc_type"] == "ledger-entry"
+            assert "title" in row and row["title"]
+            assert "file_path" in row and row["file_path"]
 
     def test_status_enum_normalized(self, db_conn, tmp_path):
         _write_ledger(

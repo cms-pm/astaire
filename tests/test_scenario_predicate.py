@@ -88,6 +88,11 @@ class TestScanAndRegister:
         ext_ids = {d["external_id"] for d in docs}
         assert ext_ids == {"SCN-8.0t-01", "SCN-8.0t-03"}
 
+        for row in result:
+            assert "doc_type" in row and row["doc_type"] == "predicate"
+            assert "title" in row and row["title"]
+            assert "file_path" in row and row["file_path"]
+
     def test_idempotent_skip_existing(self, db_conn, tmp_path):
         _write_predicate(
             tmp_path,
