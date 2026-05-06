@@ -140,6 +140,9 @@ def scan_and_register(
         registered.append(
             {
                 "document_id": doc_id,
+                "file_path": str(ledger_path),
+                "doc_type": "ledger-entry",
+                "title": title,
                 "scenario_id": scn_id,
                 "status": status,
                 "predicate_hash": record.get("predicate_hash"),

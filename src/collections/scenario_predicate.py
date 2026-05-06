@@ -138,9 +138,11 @@ def scan_and_register(
             registered.append(
                 {
                     "document_id": doc_id,
+                    "file_path": str(predicate_path),
+                    "doc_type": "predicate",
+                    "title": title,
                     "scenario_id": scn_id,
                     "predicate_hash": phash,
-                    "file_path": str(predicate_path),
                 }
             )
 
