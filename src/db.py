@@ -58,8 +58,10 @@ def migrate_source_type_taxonomy(conn: sqlite3.Connection) -> bool:
     if "'chunk-plan'" in existing_sql:
         return False
 
-    conn.execute("BEGIN")
+    foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    conn.execute("PRAGMA foreign_keys = OFF")
     try:
+        conn.execute("BEGIN")
         conn.execute("""
             CREATE TABLE source__new (
                 source_id     TEXT PRIMARY KEY,
@@ -90,6 +92,14 @@ def migrate_source_type_taxonomy(conn: sqlite3.Connection) -> bool:
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.execute(f"PRAGMA foreign_keys = {'ON' if foreign_keys_enabled else 'OFF'}")
+    if foreign_keys_enabled:
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                f"foreign key violations after source migration: {violations}"
+            )
     logger.info("Migrated source.source_type CHECK constraint with governance types")
     return True
 

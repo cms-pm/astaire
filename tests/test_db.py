@@ -141,6 +141,45 @@ class TestSourceTypeTaxonomyMigration:
         conn.commit()
         conn.close()
 
+    def test_migration_preserves_rows_with_foreign_key_dependents(self):
+        conn = self._legacy_db()
+        from src.utils.ulid import generate
+
+        conn.execute("""
+            CREATE TABLE ingest_log (
+                log_id    TEXT PRIMARY KEY,
+                source_id TEXT REFERENCES source(source_id)
+            )
+        """)
+        sid = generate()
+        log_id = generate()
+        conn.execute(
+            "INSERT INTO source (source_id, title, source_type, content_hash) "
+            "VALUES (?, 'note-1', 'note', 'h1')",
+            (sid,),
+        )
+        conn.execute(
+            "INSERT INTO ingest_log (log_id, source_id) VALUES (?, ?)",
+            (log_id, sid),
+        )
+        conn.commit()
+
+        assert migrate_source_type_taxonomy(conn) is True
+
+        row = conn.execute(
+            """
+            SELECT s.title
+            FROM ingest_log il
+            JOIN source s ON s.source_id = il.source_id
+            WHERE il.log_id = ?
+            """,
+            (log_id,),
+        ).fetchone()
+        assert row["title"] == "note-1"
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        conn.close()
+
     def test_migration_is_idempotent(self):
         conn = self._legacy_db()
         assert migrate_source_type_taxonomy(conn) is True
