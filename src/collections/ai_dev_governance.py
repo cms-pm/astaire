@@ -185,6 +185,8 @@ def scan_and_register(
                 continue
             if filepath.suffix in (".pyc", ".pyo"):
                 continue
+            if _should_skip_scan_file(filepath, doc_type):
+                continue
 
             path_str = str(filepath)
             if path_str in existing_paths:
@@ -258,6 +260,13 @@ def _glob_dir_recursive(directory: Path) -> list[Path]:
         f for f in directory.rglob("*")
         if f.is_file() and not any(part.startswith(".") for part in f.parts)
     )
+
+
+def _should_skip_scan_file(filepath: Path, doc_type: str) -> bool:
+    """Filter helper for generated files under broad governance scan roots."""
+    if doc_type == "test-card" and "_golden" in filepath.parts:
+        return True
+    return False
 
 
 def _scan_governance_board(root: Path) -> list[tuple[Path, str, dict[str, str]]]:

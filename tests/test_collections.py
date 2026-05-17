@@ -214,6 +214,11 @@ class TestScanAndRegister:
             "purpose: Prove telemetry.\n"
             "---\n# Fleet Upload Execution Telemetry Proof\n"
         )
+        golden_dir = cards_dir / "_golden"
+        golden_dir.mkdir()
+        (golden_dir / "fleet-upload-hil-chain.pyocd.sh").write_text(
+            "# generated UTC: <redacted>\nset -euo pipefail\n"
+        )
 
         # One sample each of doc_types we must NOT touch
         pq_dir = tmp_path / "docs" / "planning" / "pool_questions"
@@ -262,6 +267,20 @@ class TestScanAndRegister:
             "copilot-upload-claim-quiescence",
             "fleet-upload-execution-telemetry-proof",
         }
+
+    def test_test_card_goldens_are_not_registered(self, db_conn, card_tree):
+        """Golden shell snapshots live under tests/cards but are generated
+        evidence, not test-card documents."""
+        register_ai_dev_governance(db_conn)
+        scan_and_register(db_conn, card_tree)
+
+        rows = query_documents(
+            db_conn,
+            collection_name=COLLECTION_NAME,
+            doc_type="test-card",
+        )
+        paths = {r["file_path"] for r in rows}
+        assert not any("_golden" in path.split("/") for path in paths)
 
     def test_non_test_card_tag_sets_unchanged(self, db_conn, card_tree):
         """P81-021-non-test-card-unchanged — chunk-plan, gherkin, and
