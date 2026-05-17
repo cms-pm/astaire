@@ -5,11 +5,13 @@ It defines the collection config and provides a scan-and-register helper
 that maps file patterns to document types and tags.
 """
 
+import json
 import logging
 import re
 import sqlite3
 from pathlib import Path
 
+from src.db import transaction
 from src.registry import create_collection, get_collection, register_document
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ COLLECTION_CONFIG = {
         "validation-evidence",
         "exception-registry",
         "governance-manifest",
+        "test-card",
     ],
     "lifecycle_stages": [
         "ingest",
@@ -85,17 +88,47 @@ SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
     ("docs/releases/astaire/", "validation-evidence", {"stage_produced": "release", "bundle_type": "astaire"}),
     ("docs/releases/rtk/", "validation-evidence", {"stage_produced": "release", "bundle_type": "rtk"}),
     ("docs/releases/bootstrap/", "validation-evidence", {"stage_produced": "release", "bundle_type": "bootstrap"}),
+    ("tests/cards/", "test-card", {"stage_produced": "plan"}),
 ]
 
 
 def register_collection(conn: sqlite3.Connection) -> str:
-    """Create the ai-dev-governance collection if it doesn't exist. Returns collection_id."""
+    """Create or refresh the ai-dev-governance collection. Returns collection_id.
+
+    On a pre-existing collection, the stored ``config_json`` is reconciled against
+    the in-code ``COLLECTION_CONFIG`` so newly-added doc_types, lifecycle stages,
+    statuses, or tag keys take effect without requiring operators to drop the DB.
+    Removals are deliberately NOT propagated — only additions — so retired doc
+    types continue to validate against historical documents.
+    """
     existing = get_collection(conn, COLLECTION_NAME)
-    if existing:
-        return existing["collection_id"]
-    return create_collection(
-        conn, COLLECTION_NAME, "SDLC artifacts for ai-dev-governance methodology", COLLECTION_CONFIG
-    )
+    if existing is None:
+        return create_collection(
+            conn, COLLECTION_NAME, "SDLC artifacts for ai-dev-governance methodology", COLLECTION_CONFIG
+        )
+
+    stored = existing.get("config") or {}
+    merged = dict(stored)
+    changed = False
+    for key in ("doc_types", "lifecycle_stages", "statuses", "tag_keys"):
+        in_code = list(COLLECTION_CONFIG.get(key, []))
+        if not in_code:
+            continue
+        current = list(merged.get(key, []))
+        additions = [v for v in in_code if v not in current]
+        if additions:
+            merged[key] = current + additions
+            changed = True
+
+    if changed:
+        with transaction(conn) as cur:
+            cur.execute(
+                "UPDATE collection SET config_json = ? WHERE collection_id = ?",
+                (json.dumps(merged), existing["collection_id"]),
+            )
+        logger.info("Refreshed collection %r config (additions only)", COLLECTION_NAME)
+
+    return existing["collection_id"]
 
 
 # Backward-compatible alias
