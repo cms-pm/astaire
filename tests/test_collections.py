@@ -65,6 +65,12 @@ class TestScanAndRegister:
 
         # Risk log
         (plan_dir / "phase-1-risks.md").write_text("# Phase 1 Risks\n")
+        (plan_dir / "phase-8.3-risks.md").write_text("# Phase 8.3 Risks\n")
+
+        # Evaluations
+        eval_dir = plan_dir / "evaluations"
+        eval_dir.mkdir()
+        (eval_dir / "p10-and-cockpitvm-style-eval.md").write_text("# Eval\n")
 
         # Board artifacts
         board_dir = plan_dir / "board"
@@ -112,6 +118,9 @@ class TestScanAndRegister:
         manifests = query_documents(db_conn, collection_name=COLLECTION_NAME, doc_type="governance-manifest")
         assert len(manifests) == 1
 
+        evaluations = query_documents(db_conn, collection_name=COLLECTION_NAME, doc_type="evaluation")
+        assert len(evaluations) == 1
+
     def test_scan_extracts_external_ids(self, db_conn, gov_tree):
         register_ai_dev_governance(db_conn)
         scan_and_register(db_conn, gov_tree)
@@ -139,8 +148,11 @@ class TestScanAndRegister:
         scan_and_register(db_conn, gov_tree)
 
         risks = query_documents(db_conn, collection_name=COLLECTION_NAME, doc_type="risk-log")
-        assert len(risks) == 1
-        assert "1" in risks[0]["tags"].get("phase", [])
+        phases = set()
+        for doc in risks:
+            phases.update(doc["tags"].get("phase", []))
+        assert "1" in phases
+        assert "8.3" in phases
 
     def test_scan_is_idempotent(self, db_conn, gov_tree):
         register_ai_dev_governance(db_conn)
