@@ -32,3 +32,18 @@ packages = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "characterisation: documents current behaviour of legacy code before Phase 10 refactors",
+]
+
+[tool.mutmut]
+paths_to_mutate = ["src/domain/claims/models.py"]
+tests_dir = ["tests/test_domain_claims.py"]
+pytest_add_cli_args = ["-q"]
+do_not_mutate = ["tests/*"]
+also_copy = [
+    "src/db.py",
+    "src/domain/__init__.py",
+    "src/domain/claims/__init__.py",
+    "src/domain/claims/ports.py",
+]

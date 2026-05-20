@@ -1,0 +1,8 @@
+[cosmic-ray]
+module-path = "src/domain/claims"
+timeout = 20.0
+excluded-modules = []
+test-command = "uv run pytest -q tests/test_domain_claims.py"
+
+[cosmic-ray.distributor]
+name = "local"

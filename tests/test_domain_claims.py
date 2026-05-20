@@ -12,11 +12,15 @@ real schema and MUST stay green.
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+from inspect import signature
+
 import pytest
 
 from src.domain.claims import (
     Claim,
     ClaimId,
+    Contradiction,
     ClaimRepository,
     Entity,
     EntityHubRow,
@@ -165,11 +169,103 @@ def projection_cache() -> ProjectionCache:
 
 class TestDomainModels:
     def test_claim_is_frozen(self, sample_claim: Claim) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             sample_claim.confidence = 0.1  # type: ignore[misc]
 
     def test_entity_aliases_are_immutable(self, sample_entity: Entity) -> None:
         assert isinstance(sample_entity.aliases, tuple)
+
+    @pytest.mark.parametrize(
+        "instance,field_name,value",
+        [
+            (
+                Entity(
+                    entity_id=EntityId("E2"),
+                    canonical_name="Entity",
+                    entity_type="concept",
+                ),
+                "canonical_name",
+                "changed",
+            ),
+            (
+                Claim(
+                    claim_id=ClaimId("C2"),
+                    entity_id=EntityId("E2"),
+                    predicate="is",
+                    value="stable",
+                    claim_type="fact",
+                    confidence=0.5,
+                    epistemic_tag="provisional",
+                    source_id="S2",  # type: ignore[arg-type]
+                ),
+                "value",
+                "changed",
+            ),
+            (
+                Contradiction(
+                    contradiction_id="K1",
+                    claim_a_id=ClaimId("C1"),
+                    claim_b_id=ClaimId("C2"),
+                    description=None,
+                    resolution_status="open",
+                ),
+                "resolution_status",
+                "superseded",
+            ),
+            (
+                EntityHubRow(
+                    canonical_name="Entity",
+                    entity_type="concept",
+                    claim_count=1,
+                    hub_score=2,
+                ),
+                "hub_score",
+                3,
+            ),
+            (
+                ProjectionMetrics(
+                    source_count=1,
+                    entity_count=2,
+                    claim_count=3,
+                    relationship_count=4,
+                    document_count=5,
+                    collection_count=6,
+                    open_contradictions=7,
+                ),
+                "claim_count",
+                4,
+            ),
+            (FTSHit(rowid=1, rank=-1.0), "rank", -2.0),
+        ],
+    )
+    def test_domain_dataclasses_are_frozen(
+        self, instance: object, field_name: str, value: object
+    ) -> None:
+        with pytest.raises(FrozenInstanceError):
+            setattr(instance, field_name, value)
+
+    @pytest.mark.parametrize(
+        "instance",
+        [
+            Entity(EntityId("E3"), "Entity", "concept"),
+            Claim(
+                ClaimId("C3"),
+                EntityId("E3"),
+                "is",
+                "slotted",
+                "fact",
+                0.7,
+                "confirmed",
+                "S3",  # type: ignore[arg-type]
+            ),
+            Contradiction("K2", ClaimId("C3"), ClaimId("C4"), None, "open"),
+            EntityHubRow("Entity", "concept", 1, 2),
+            ProjectionMetrics(1, 2, 3, 4, 5, 6, 7),
+            FTSHit(1, -1.0),
+        ],
+    )
+    def test_domain_dataclasses_are_slotted(self, instance: object) -> None:
+        assert not hasattr(instance, "__dict__")
 
 
 class TestPortProtocols:
@@ -214,6 +310,10 @@ class TestPortProtocols:
         assert repo.list_active_claims_for_entity(sample_entity.entity_id) == [
             live
         ]
+
+    def test_protocol_default_limits_are_stable(self) -> None:
+        assert signature(EntityRepository.list_hub_rows).parameters["limit"].default == 30
+        assert signature(FTSIndex.search).parameters["limit"].default == 50
 
 
 class TestProjectionAggregators:
