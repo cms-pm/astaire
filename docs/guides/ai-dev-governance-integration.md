@@ -12,6 +12,7 @@ Astaire gives ai-dev-governance workflows:
 - **Context assembly** — assemble token-budgeted context for LLM consumption
 - **Drift detection** — detect when registered files have been modified on disk
 - **Health checks** — lint for missing documents, orphan entities, stale caches
+- **Governance authoring recall** — index normative source artifacts from `core/`, `adapters/`, `contracts/`, `templates/`, `runbooks/`, and `CHANGELOG.md`
 
 ## Setup
 
@@ -85,19 +86,44 @@ The ai-dev-governance collection maps these file patterns:
 | `docs/planning/pool_questions/` | pool-question | stage_produced=plan |
 | `docs/planning/scenarios/` | gherkin | stage_produced=artifact-generation |
 | `docs/planning/chunks/` | chunk-plan | stage_produced=plan |
+| `docs/planning/evaluations/` | evaluation | stage_produced=plan |
 | `docs/planning/signoffs.md` | signoff | stage_produced=plan |
 | `docs/planning/traceability.md` | traceability | stage_produced=artifact-generation |
 | `docs/planning/phase-*` | risk-log | stage_produced=plan |
 | `docs/planning/board/board-selection-*` | board-selection | stage_produced=plan |
+| `docs/planning/board/board-composition-approval-*` | board-decision | stage_produced=board-review |
+| `docs/planning/board/committee-opportunity-register-*` | board-packet | stage_produced=board-review |
 | `docs/planning/board/committee-review-packet-*` | board-packet | stage_produced=board-review |
 | `docs/planning/board/committee-virtual-meeting-*` | meeting-record | stage_produced=board-review |
 | `docs/planning/board/members/` | board-member-profile | stage_produced=plan |
-| `docs/plan/implementation-plan.md` | implementation-plan | stage_produced=plan |
+| `docs/planning/implementation-plan.md` | implementation-plan | stage_produced=plan |
 | `docs/governance/exceptions.yaml` | exception-registry | — |
+| `docs/evidence/seam-maps/` | seam-map | stage_produced=validation |
+| `docs/evidence/mutation/` | mutation-report | stage_produced=validation |
+| `docs/evidence/farley/` | farley-scorecard | stage_produced=validation |
+| `docs/glossary/` | domain-glossary | stage_produced=plan |
+| `docs/releases/astaire/` | validation-evidence | stage_produced=release, bundle_type=astaire |
+| `docs/releases/rtk/` | validation-evidence | stage_produced=release, bundle_type=rtk |
+| `docs/releases/bootstrap/` | validation-evidence | stage_produced=release, bundle_type=bootstrap |
 | `governance.yaml` | governance-manifest | stage_produced=ingest |
 
+The companion `governance-authoring` collection indexes the normative source
+tree:
+
+| Path Pattern | Document Type | Base Tags |
+|-------------|---------------|-----------|
+| `core/` | core-policy | policy_area=core |
+| `adapters/profiles/` | adapter-profile | policy_area=profile |
+| `adapters/providers/claude/skills/` | provider-skill | policy_area=provider |
+| `adapters/providers/` | adapter-spec | policy_area=provider |
+| `adapters/tooling/` | adapter-spec | policy_area=tooling |
+| `contracts/` | contract-schema | policy_area=contracts |
+| `templates/` | template | policy_area=templates |
+| `runbooks/` | runbook | policy_area=runbooks |
+| `CHANGELOG.md` | changelog-entry | policy_area=releases |
+
 Additional tags are extracted automatically:
-- **phase** — from `phase-N` in filenames
+- **phase** — from `phase-N`, including fractional forms such as `phase-9.5`
 - **chunk** — from `chunk-X.Y` or `SCN-X.Y` in filenames
 
 ## Query Patterns
