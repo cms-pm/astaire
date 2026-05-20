@@ -171,4 +171,17 @@ The `SCAN_RULES` list maps filesystem paths to document types and tags. Each rul
 - **doc_type**: Must match a value in `COLLECTION_CONFIG["doc_types"]`.
 - **base_tags**: Dict of tags applied to all files matching this rule.
 
-You can add additional tags dynamically in `scan_and_register()` based on filename patterns (e.g., extracting version numbers or component names from filenames).
+You can add additional tags dynamically in `scan_and_register()` based on filename patterns (e.g., extracting version numbers or component names from filenames). The built-in governance collections use this pattern for fractional phase tags (`phase=9.5`) and SCN/chunk tags (`chunk=9.7`).
+
+## Existing Collections as References
+
+- `ai-dev-governance` indexes SDLC artifacts such as scenarios, chunk plans,
+  evaluations, handoffs, validation evidence, release bundles, glossary entries,
+  and mutation reports.
+- `governance-authoring` indexes the normative governance source tree, including
+  policies, adapters, contracts, templates, runbooks, provider skills, adapter
+  profiles, and changelog entries.
+
+Both collections are auto-discovered like any custom collection module and can
+be queried with the same `astaire query`, `astaire context`, and `astaire scan`
+commands.

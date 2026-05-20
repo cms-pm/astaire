@@ -11,7 +11,27 @@ LLM workflows typically read raw files for context. This is slow, expensive, and
 - **133.1x faster** tag-based queries vs filesystem glob+read
 - **8.9x faster** full collection assembly vs sequential file reads
 
-These are measured results from the `ai-dev-governance` dogfood workspace on `v0.6.0`, using a `96`-document dataset across `3` collections. See [benchmarks](#benchmarks) for details.
+These are historical measured results from the `ai-dev-governance` dogfood workspace on `v0.6.0`, using a `96`-document dataset across `3` collections. See [benchmarks](#benchmarks) for details.
+
+## What's New in v0.5.0
+
+Astaire v0.5.0 carries the Phase 9 governance support work used by the
+`ai-dev-governance` v1.0.0 release:
+
+- Expanded `ai-dev-governance` collection coverage for evaluations,
+  implementation handoffs, validation evidence, seam maps, mutation reports,
+  Farley scorecards, domain glossary entries, and release evidence bundles.
+- New `governance-authoring` collection for normative source artifacts under
+  `core/`, `adapters/`, `contracts/`, `templates/`, `runbooks/`, and
+  `CHANGELOG.md`.
+- Provider-skill and adapter-profile indexing for provider-specific governance
+  surfaces.
+- Fractional phase and SCN-style tag extraction, including queries such as
+  `--tag phase=9.5` and `--tag chunk=9.7`.
+- Claims/projection hexagonal pilot with frozen domain models and SQLite claim,
+  FTS, and projection-cache adapters.
+- Mutation baseline harness with `mutmut.ini`, `cosmic-ray.toml`, and
+  characterisation coverage for legacy ingest, FTS, and CLI behavior.
 
 ## Installation
 
@@ -97,7 +117,7 @@ Astaire is meant to be the broker of context, not just a database. In the `ai-de
 - **Astaire L1/L2** handle scoped recall when a question needs more than the global summary.
 - **graphify** contributes structural routes so agents can jump directly into codebase topology instead of re-reading the filesystem.
 
-In the current `v0.6.0` dogfood release snapshot, Astaire carries:
+In the historical `v0.6.0` dogfood release snapshot, Astaire carried:
 
 - `5` active claims
 - `5` entities
@@ -174,7 +194,7 @@ In restricted or sandboxed environments, set a writable `uv` cache explicitly:
 
 ### Results
 
-Measured against the `ai-dev-governance` dogfood workspace on a MacBook (`v0.6.0`, 2026-04-20), with `96` registered documents across `3` collections:
+Measured against the `ai-dev-governance` dogfood workspace on a MacBook (`v0.6.0`, 2026-04-20), with `96` registered documents across `3` collections. These numbers are retained as the latest published benchmark snapshot; rerun the benchmark before treating them as v0.5.0 performance evidence.
 
 | Metric | Astaire | Raw FS | Improvement |
 |--------|---------|--------|-------------|
