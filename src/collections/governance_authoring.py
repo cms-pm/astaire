@@ -22,6 +22,7 @@ COLLECTION_CONFIG = {
         "core-policy",
         "adapter-spec",
         "adapter-profile",
+        "provider-skill",
         "contract-schema",
         "template",
         "runbook",
@@ -55,6 +56,7 @@ COLLECTION_CONFIG = {
 SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
     ("core/",                    "core-policy",        {"policy_area": "core"}),
     ("adapters/profiles/",       "adapter-profile",    {"policy_area": "profile"}),
+    ("adapters/providers/claude/skills/",  "provider-skill", {"policy_area": "provider"}),
     ("adapters/providers/",      "adapter-spec",       {"policy_area": "provider"}),
     ("adapters/tooling/",        "adapter-spec",       {"policy_area": "tooling"}),
     ("contracts/",               "contract-schema",    {"policy_area": "contracts"}),
