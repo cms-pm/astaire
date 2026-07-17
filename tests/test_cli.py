@@ -50,6 +50,18 @@ def tmp_db(tmp_path):
 
 
 @pytest.fixture
+def tmp_db_core_only(tmp_path):
+    """Create a temporary database file with only the core registry
+    installed (no claims module) — used to exercise the B1/B2/B3
+    core-only guard regressions at the CLI-command level."""
+    db_path = str(tmp_path / "test_core_only.db")
+    conn = get_connection(db_path)
+    init_db(conn)
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
 def sample_project(tmp_path):
     """Create a temporary directory mimicking a project structure
     with sample artifacts matching discovered collection scan rules."""
@@ -662,6 +674,23 @@ class TestExport:
         assert (wiki / "timeline.md").exists()
         assert (wiki / "collections").is_dir()
 
+    def test_export_on_core_only_db_fails_cleanly_without_deleting(
+        self, tmp_db_core_only, tmp_path, capsys
+    ):
+        """Regression (B1): a core-only DB must not have its existing wiki
+        output destroyed before export_wiki() discovers the claims module
+        is absent."""
+        wiki_dir = tmp_path / "wiki_out"
+        wiki_dir.mkdir()
+        existing = wiki_dir / "keepme.md"
+        existing.write_text("do not delete me")
+
+        with pytest.raises(RuntimeError, match="Claims module not installed"):
+            cmd_export(_args(db=tmp_db_core_only, output=str(wiki_dir)))
+
+        assert existing.exists()
+        assert existing.read_text() == "do not delete me"
+
 
 # ── Prune ────────────────────────────────────────────────────────
 
@@ -732,6 +761,39 @@ class TestPrune:
         ).fetchone()[0]
         assert count == 0
         conn.close()
+
+    def test_prune_on_core_only_db_still_prunes_query_log(
+        self, tmp_db_core_only, capsys
+    ):
+        """Regression (B3): cmd_prune() calls prune_expired_claims() before
+        prune_query_log() — on a core-only DB the former must no-op cleanly
+        rather than raise, so the latter (a core-registry feature) still
+        runs."""
+        conn = get_connection(tmp_db_core_only)
+        log_id = ulid.generate()
+        with transaction(conn) as cur:
+            cur.execute(
+                "INSERT INTO ingest_log (log_id, operation, summary, created_at) "
+                "VALUES (?, 'query', ?, ?)",
+                (log_id, "test query", "2000-01-01T00:00:00Z"),
+            )
+        conn.close()
+
+        cmd_prune(_args(db=tmp_db_core_only))
+        out = capsys.readouterr().out
+        assert "Pruned 1 stale query log entry" in out
+
+        conn = get_connection(tmp_db_core_only)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ingest_log WHERE log_id = ?", (log_id,)
+        ).fetchone()[0]
+        assert count == 0
+        conn.close()
+
+    def test_prune_on_core_only_db_with_nothing_to_prune(self, tmp_db_core_only, capsys):
+        cmd_prune(_args(db=tmp_db_core_only))
+        out = capsys.readouterr().out
+        assert "Nothing to prune" in out
 
 
 # ── Sync ─────────────────────────────────────────────────────────
@@ -1020,6 +1082,47 @@ class TestGraphifyImport:
         ))
         capsys.readouterr()
         assert captured["contract_registry_path"] == str(registry)
+
+    def test_graphify_import_on_core_only_db_leaves_no_orphan_source(
+        self, tmp_db_core_only, tmp_path, capsys
+    ):
+        """Regression (B2): a core-only DB must not end up with a
+        committed `source` row when the claims-side write fails."""
+        project = tmp_path / "project"
+        graph_dir = project / "graphify-out"
+        graph_dir.mkdir(parents=True)
+        (project / "governance.yaml").write_text(
+            "profile: strict-baseline\n"
+            "graphify:\n"
+            "  promotionThreshold: absolute:2\n"
+            "  promotionFloor: 1\n"
+            "  promotionCeiling: 10\n"
+        )
+        (graph_dir / "graph.json").write_text(json.dumps({
+            "source_repo": "repo-a",
+            "graph_version": "v1",
+            "graph_schema_version": "gs1",
+            "nodes": [
+                {"id": "svc", "label": "Service", "node_type": "service"},
+                {"id": "contract", "label": "Contract", "node_type": "contract"},
+            ],
+            "links": [
+                {"source": "svc", "target": "contract", "relation": "depends_on", "confidence": "EXTRACTED"},
+            ],
+        }))
+
+        with pytest.raises(RuntimeError, match="Claims module not installed"):
+            cmd_graphify_import(_args(
+                db=tmp_db_core_only, root=str(project), graph=None, threshold=None,
+                floor=None, ceiling=None, pinned_node=None, inferred_edge_threshold=None,
+                annotate_approval_status=False, contract_registry=None, auto_tune=False,
+                l0_budget=2000,
+            ))
+
+        conn = get_connection(tmp_db_core_only)
+        count = conn.execute("SELECT COUNT(*) FROM source").fetchone()[0]
+        conn.close()
+        assert count == 0
 
 
 # ── Negative paths (Phase 5 hardening) ──────────────────────────

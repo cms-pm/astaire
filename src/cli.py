@@ -686,6 +686,12 @@ def main() -> None:
             print(f"Error: database not initialized. Run 'astaire init' first.", file=sys.stderr)
             sys.exit(1)
         raise
+    except RuntimeError as exc:
+        # Claims-module-absent guards (ingest_source, export_wiki,
+        # import_graphify) raise a plain RuntimeError with an actionable
+        # enable-hint. Print it cleanly instead of a raw traceback.
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

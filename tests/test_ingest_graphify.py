@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from src.ingest_graphify import import_graphify
 from src.routing import parse_route_hint
 
@@ -301,3 +303,47 @@ def test_route_hint_fixture_parses(tmp_path):
     parsed = [parse_route_hint(line) for line in fixture.read_text().splitlines() if line.strip()]
     assert parsed[0]["tentacle"] == "astaire.l1"
     assert parsed[1]["tentacle"] == "graphify.query"
+
+
+# ── Regression: B2 — import_graphify() must not commit an orphan ──
+# ── `source` row before validating claims-module presence ─────────
+
+def test_core_only_db_raises_without_orphan_source_row(db_conn_core_only, tmp_path):
+    graph_path = _write_graph(
+        tmp_path / "graph.json",
+        nodes=[
+            {"id": "svc", "label": "Service", "node_type": "service"},
+            {"id": "contract", "label": "Contract", "node_type": "contract"},
+        ],
+        links=[
+            {"source": "svc", "target": "contract", "relation": "depends_on", "confidence": "EXTRACTED"},
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="Claims module not installed"):
+        import_graphify(db_conn_core_only, graph_path, threshold="absolute:2", floor=1, ceiling=10)
+
+    # No `source` row should have been committed — this is the exact
+    # partial-write failure mode ingest_source()'s guard prevents.
+    row = db_conn_core_only.execute("SELECT COUNT(*) AS n FROM source").fetchone()
+    assert row["n"] == 0
+
+
+def test_core_only_db_raises_before_cache_hit_path_too(db_conn_core_only, tmp_path):
+    """Even a re-run that would hit the L1 cache on a with-claims DB must
+    still be rejected on a core-only DB — _ensure_graphify_source() is
+    reached on the cache-hit path as well, so the guard must sit ahead of
+    both branches in import_graphify(), not just the cache-miss path."""
+    graph_path = _write_graph(
+        tmp_path / "graph.json",
+        nodes=[{"id": "svc", "label": "Service", "node_type": "service"}],
+        links=[],
+    )
+
+    with pytest.raises(RuntimeError, match="astaire init --with-claims"):
+        import_graphify(db_conn_core_only, graph_path, threshold="absolute:1", floor=1, ceiling=10)
+    with pytest.raises(RuntimeError, match="astaire init --with-claims"):
+        import_graphify(db_conn_core_only, graph_path, threshold="absolute:1", floor=1, ceiling=10)
+
+    row = db_conn_core_only.execute("SELECT COUNT(*) AS n FROM source").fetchone()
+    assert row["n"] == 0

@@ -181,13 +181,24 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
         if claims_installed
         else ""
     )
+    # Kept as two separate blocks (rather than one claims_metrics_block
+    # including "Open contradictions") so the Key metrics line order
+    # matches the documented L0 template: Total sources, [claims metrics],
+    # Total documents, Total collections, Open contradictions, Last
+    # ingest, Last lint. Folding "Open contradictions" into the earlier
+    # block would move it ahead of Total documents/collections, which
+    # would flip every existing with-claims DB's L0 content hash on the
+    # next generate_l0() call and trip a spurious one-time
+    # check_l0_staleness() warning on upgrade.
     claims_metrics_block = (
         f"- Total active claims: {claim_count}\n"
         f"- Total entities: {entity_count}\n"
         f"- Total relationships: {rel_count}\n"
-        f"- Open contradictions: {contradiction_count}\n"
         if claims_installed
         else ""
+    )
+    contradictions_metric_line = (
+        f"- Open contradictions: {contradiction_count}\n" if claims_installed else ""
     )
 
     content = f"""# Knowledge base state — {now}
@@ -202,7 +213,7 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
 - Total sources: {source_count}
 {claims_metrics_block}- Total documents: {document_count}
 - Total collections: {collection_count}
-- Last ingest: {last_ingest['created_at'] if last_ingest else 'never'}
+{contradictions_metric_line}- Last ingest: {last_ingest['created_at'] if last_ingest else 'never'}
 - Last lint: {last_lint['created_at'] if last_lint else 'never'}
 """
 

@@ -8,7 +8,7 @@ refreshed post-prune.
 import logging
 import sqlite3
 
-from src.db import transaction
+from src.db import claims_module_present, transaction
 from src.project import generate_l0, invalidate_cache
 from src.utils import ulid
 
@@ -56,7 +56,15 @@ def prune_expired_claims(
     """Remove expired claims and clean up related data.
 
     Returns dict: claims_pruned, clusters_cleaned, l0_regenerated.
+
+    A no-op (all-zero/False stats) on a core-only database — the optional
+    claims module (Proposal A) owns the `claim` table this function prunes,
+    and its absence is not an error here: `cmd_prune()` still needs
+    `prune_query_log()` (a core-registry feature) to run unconditionally.
     """
+    if not claims_module_present(conn):
+        return {"claims_pruned": 0, "clusters_cleaned": 0, "l0_regenerated": False}
+
     # Find expired claims
     expired = conn.execute(
         """SELECT claim_id, entity_id FROM claim
