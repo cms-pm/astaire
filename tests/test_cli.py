@@ -21,6 +21,7 @@ from src.cli import (
     cmd_lint,
     cmd_prune,
     cmd_query,
+    cmd_reindex_content,
     cmd_scan,
     cmd_status,
     cmd_startup,
@@ -120,7 +121,7 @@ def sample_project(tmp_path):
 
 def _args(**kwargs):
     """Build a Namespace with defaults."""
-    defaults = {"db": None, "verbose": False, "no_sync": False}
+    defaults = {"db": None, "verbose": False, "no_sync": False, "tag_prefix": None}
     defaults.update(kwargs)
     return Namespace(**defaults)
 
@@ -436,6 +437,89 @@ class TestQuery:
         out = capsys.readouterr().out
         assert "0 document(s) found" in out
 
+    def test_query_fts_no_results_shows_diagnostics(self, query_db, capsys):
+        db_path, _ = query_db
+        cmd_query(_args(
+            db=db_path, collection=None,
+            type=None, status=None, tag=None, fts="nonexistent-term-xyz", json=False,
+        ))
+        out = capsys.readouterr().out
+        assert "0 document(s) found" in out
+        assert "searched fields:" in out
+        assert "doc_types in scope:" in out
+
+
+class TestQueryTagPrefix:
+    """Proposal B item 3: --tag-prefix CLI flag for hierarchical tag queries."""
+
+    def test_tag_prefix_matches_hierarchical_values(self, tmp_db, capsys):
+        conn = get_connection(tmp_db)
+        create_collection(conn, "chunked", config={})
+        conn.close()
+
+        f1 = Path(tmp_db).parent / "coarse.md"
+        f1.write_text("Coarse chunk doc")
+        f2 = Path(tmp_db).parent / "fine.md"
+        f2.write_text("Fine chunk doc")
+
+        conn = get_connection(tmp_db)
+        register_document(conn, "chunked", f1, "spec", "Coarse", tags={"chunk": "7.1"})
+        register_document(conn, "chunked", f2, "spec", "Fine", tags={"chunk": "7.1.16"})
+        conn.close()
+
+        cmd_query(_args(
+            db=tmp_db, collection="chunked",
+            type=None, status=None, tag=None, tag_prefix=["chunk=7.1"], fts=None, json=False,
+        ))
+        out = capsys.readouterr().out
+        assert "2 document(s) found" in out
+
+
+class TestQueryLog:
+    """Proposal B item 5: query operations write an ingest_log row."""
+
+    @pytest.fixture
+    def query_db(self, tmp_path, sample_project):
+        db_path = str(tmp_path / "query.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+        conn = get_connection(db_path)
+        col_name = conn.execute("SELECT name FROM collection LIMIT 1").fetchone()["name"]
+        conn.close()
+        return db_path, col_name
+
+    def test_query_writes_ingest_log_row_with_filters_and_hit_count(self, query_db, capsys):
+        db_path, col_name = query_db
+        cmd_query(_args(
+            db=db_path, collection=col_name,
+            type=None, status=None, tag=None, fts=None, json=False,
+        ))
+        out = capsys.readouterr().out
+        hit_count = int(out.split(" document(s) found")[0].strip())
+
+        conn = get_connection(db_path)
+        rows = conn.execute("SELECT * FROM ingest_log WHERE operation = 'query'").fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert f"{hit_count} hit(s)" in rows[0]["summary"]
+        assert f"collection={col_name}" in rows[0]["summary"]
+
+    def test_query_log_summary_reflects_fts_query(self, query_db, capsys):
+        db_path, _ = query_db
+        cmd_query(_args(
+            db=db_path, collection=None,
+            type=None, status=None, tag=None, fts="registry", json=False,
+        ))
+        capsys.readouterr()
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT * FROM ingest_log WHERE operation = 'query' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert "registry" in row["summary"]
+        assert "hit(s)" in row["summary"]
+
 
 # ── Context ──────────────────────────────────────────────────────
 
@@ -557,6 +641,28 @@ class TestPrune:
         assert count == 0
         conn.close()
 
+    def test_prune_removes_stale_query_log(self, tmp_db, capsys):
+        conn = get_connection(tmp_db)
+        log_id = ulid.generate()
+        with transaction(conn) as cur:
+            cur.execute(
+                "INSERT INTO ingest_log (log_id, operation, summary, created_at) "
+                "VALUES (?, 'query', ?, ?)",
+                (log_id, "test query", "2000-01-01T00:00:00Z"),
+            )
+        conn.close()
+
+        cmd_prune(_args(db=tmp_db))
+        out = capsys.readouterr().out
+        assert "Pruned 1 stale query log entry" in out
+
+        conn = get_connection(tmp_db)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ingest_log WHERE log_id = ?", (log_id,)
+        ).fetchone()[0]
+        assert count == 0
+        conn.close()
+
 
 # ── Sync ─────────────────────────────────────────────────────────
 
@@ -599,6 +705,42 @@ class TestSync:
         cmd_sync(_args(db=db_path, collection=None))
         out = capsys.readouterr().out
         assert "MISSING" in out
+
+
+class TestReindexContent:
+    """Backfill path for a collection that opts into fts_content_index after
+    its documents are already registered — found via live testing against a
+    real populated database."""
+
+    def test_reindex_backfills_and_reports_count(self, tmp_path, sample_project, capsys):
+        db_path = str(tmp_path / "reindex2.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+
+        conn = get_connection(db_path)
+        col_name = conn.execute("SELECT name FROM collection LIMIT 1").fetchone()["name"]
+        conn.execute(
+            "UPDATE collection SET config_json = json_set(config_json, '$.fts_content_index', json('true')) "
+            "WHERE name = ?",
+            (col_name,),
+        )
+        conn.commit()
+        conn.close()
+
+        cmd_reindex_content(_args(db=db_path, collection=col_name))
+        out = capsys.readouterr().out
+        assert "Indexed" in out
+        assert "document(s)" in out
+
+    def test_reindex_reports_zero_when_no_collection_opted_in(self, tmp_path, sample_project, capsys):
+        db_path = str(tmp_path / "reindex3.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+
+        cmd_reindex_content(_args(db=db_path, collection=None))
+        out = capsys.readouterr().out
+        assert "Indexed 0 document(s)" in out
+        assert "not opted in" in out
 
 
 # ── Ingest ───────────────────────────────────────────────────────

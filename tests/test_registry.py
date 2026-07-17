@@ -6,15 +6,18 @@ import pytest
 
 from src.db import get_connection, init_db, transaction
 from src.registry import (
+    DEFAULT_FTS_CONTENT_MAX_BYTES,
     assemble_context,
     assemble_tagged_context,
     create_collection,
+    diagnose_zero_results,
     get_by_external_id,
     get_collection,
     get_document,
     query_documents,
     register_dependency,
     register_document,
+    reindex_content,
     search_documents,
     sync_collection,
     sync_document,
@@ -248,6 +251,314 @@ class TestQuery:
     def test_query_no_results(self, db_conn, collection):
         results = query_documents(db_conn, doc_type="nonexistent")
         assert results == []
+
+
+class TestTagPrefixQuery:
+    """Proposal B item 3: prefix matching for hierarchical tag vocabularies."""
+
+    def test_exact_match_still_exact_by_default(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "Coarse",
+            tags={"chunk": "7.1"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "Fine",
+            tags={"chunk": "7.1.16"},
+        )
+        results = query_documents(db_conn, tags={"chunk": "7.1"})
+        assert [r["title"] for r in results] == ["Coarse"]
+
+    def test_prefix_matches_hierarchical_values(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "Coarse",
+            tags={"chunk": "7.1"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "Fine",
+            tags={"chunk": "7.1.16"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc3"], "spec", "Unrelated",
+            tags={"chunk": "8.1"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"chunk": "7.1"})
+        titles = {r["title"] for r in results}
+        assert titles == {"Coarse", "Fine"}
+
+    def test_prefix_does_not_match_short_common_substring(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "Target",
+            tags={"chunk": "7.1"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "SharesSubstring",
+            tags={"chunk": "17.1"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"chunk": "7.1"})
+        titles = {r["title"] for r in results}
+        assert titles == {"Target"}
+
+    def test_literal_percent_in_prefix_not_treated_as_wildcard(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "PercentLiteral",
+            tags={"progress": "50%off"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "WouldFalseMatch",
+            tags={"progress": "50zoff"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"progress": "50%"})
+        titles = {r["title"] for r in results}
+        assert titles == {"PercentLiteral"}
+
+    def test_literal_underscore_in_prefix_not_treated_as_wildcard(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "UnderscoreLiteral",
+            tags={"slug": "50_off"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "WouldFalseMatch",
+            tags={"slug": "50zoff"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"slug": "50_"})
+        titles = {r["title"] for r in results}
+        assert titles == {"UnderscoreLiteral"}
+
+
+class TestFullTextSearch:
+    """Proposal B item 1: honest --fts, opt-in size-gated content indexing."""
+
+    def test_search_finds_documents_by_title(self, db_conn, collection, sample_docs):
+        register_document(db_conn, "test-collection", sample_docs["doc1"], "spec", "Alfven Wave Notes")
+        register_document(db_conn, "test-collection", sample_docs["doc2"], "spec", "Unrelated")
+        hits = search_documents(db_conn, "Alfven")
+        assert [h["title"] for h in hits] == ["Alfven Wave Notes"]
+
+    def test_search_does_not_find_body_content_by_default(self, db_conn, collection, sample_docs):
+        # doc1's body contains "testing" in its content but not its title —
+        # a collection that has not opted into content indexing must not
+        # match on it (the honesty fix is *opt-in*, not universal).
+        register_document(db_conn, "test-collection", sample_docs["doc1"], "spec", "Doc One")
+        hits = search_documents(db_conn, "testing")
+        assert hits == []
+
+    def test_search_finds_body_content_when_collection_opts_in(self, db_conn, sample_docs):
+        create_collection(
+            db_conn, "content-indexed",
+            config={"fts_content_index": True},
+        )
+        register_document(db_conn, "content-indexed", sample_docs["doc1"], "spec", "Doc One")
+        # "testing" appears only in doc1's body ("...first document about
+        # testing."), never in its title/external_id/doc_type.
+        hits = search_documents(db_conn, "testing")
+        assert [h["title"] for h in hits] == ["Doc One"]
+
+    def test_content_indexing_skips_documents_over_the_size_gate(self, db_conn, tmp_path):
+        create_collection(
+            db_conn, "gated",
+            config={"fts_content_index": True, "fts_content_max_bytes": 10},
+        )
+        big = tmp_path / "big.md"
+        big.write_text("this content is well over ten bytes long")
+        register_document(db_conn, "gated", big, "spec", "Big Doc")
+        hits = search_documents(db_conn, "content")
+        assert hits == []  # skipped: over the 10-byte gate, body stays empty
+
+    def test_content_indexing_default_size_gate_is_generous(self, db_conn):
+        assert DEFAULT_FTS_CONTENT_MAX_BYTES >= 100_000
+
+    def test_sync_reindexes_body_when_content_changes(self, db_conn, tmp_path):
+        create_collection(db_conn, "content-indexed-2", config={"fts_content_index": True})
+        f = tmp_path / "f.md"
+        f.write_text("original body text")
+        doc_id = register_document(db_conn, "content-indexed-2", f, "spec", "F")
+        assert search_documents(db_conn, "original") != []
+
+        f.write_text("revised body text")
+        result = sync_document(db_conn, doc_id)
+        assert result["changed"] is True
+        assert search_documents(db_conn, "original") == []
+        assert [h["title"] for h in search_documents(db_conn, "revised")] == ["F"]
+
+    def test_title_update_does_not_wipe_previously_indexed_body(self, db_conn, tmp_path):
+        # Regression guard: the document_fts UPDATE trigger must not reset
+        # `body` to empty just because title/external_id/doc_type changed.
+        create_collection(db_conn, "content-indexed-3", config={"fts_content_index": True})
+        f = tmp_path / "f.md"
+        f.write_text("durable body content")
+        doc_id = register_document(db_conn, "content-indexed-3", f, "spec", "Original Title")
+
+        with transaction(db_conn) as cur:
+            cur.execute(
+                "UPDATE document SET title = ? WHERE document_id = ?",
+                ("Renamed Title", doc_id),
+            )
+
+        assert [h["title"] for h in search_documents(db_conn, "durable")] == ["Renamed Title"]
+
+
+class TestReindexContent:
+    """The opt-in-after-the-fact backfill path (found via live testing against
+    a real populated database — sync alone never reaches a document whose
+    collection newly opted into fts_content_index, since a config_json edit
+    changes no file's content_hash)."""
+
+    def test_reindex_backfills_documents_registered_before_opt_in(self, db_conn, sample_docs):
+        create_collection(db_conn, "late-opt-in", config={})
+        register_document(db_conn, "late-opt-in", sample_docs["doc1"], "spec", "D1")
+        assert search_documents(db_conn, "testing") == []  # not opted in yet
+
+        with transaction(db_conn) as cur:
+            cur.execute(
+                "UPDATE collection SET config_json = ? WHERE name = ?",
+                ('{"fts_content_index": true}', "late-opt-in"),
+            )
+
+        result = reindex_content(db_conn, collection_name="late-opt-in")
+        assert result["indexed"] == 1
+        assert [h["title"] for h in search_documents(db_conn, "testing")] == ["D1"]
+
+    def test_reindex_skips_and_reports_collections_not_opted_in(self, db_conn, collection, sample_docs):
+        register_document(db_conn, "test-collection", sample_docs["doc1"], "spec", "D1")
+        result = reindex_content(db_conn, collection_name="test-collection")
+        assert result == {
+            "indexed": 0, "skipped_over_gate": 0,
+            "skipped_not_opted_in": 1, "missing_files": [], "read_errors": [],
+        }
+
+    def test_reindex_clears_body_when_collection_opts_out_again(self, db_conn, sample_docs):
+        create_collection(db_conn, "toggle", config={"fts_content_index": True})
+        register_document(db_conn, "toggle", sample_docs["doc1"], "spec", "D1")
+        assert search_documents(db_conn, "testing") != []
+
+        with transaction(db_conn) as cur:
+            cur.execute(
+                "UPDATE collection SET config_json = ? WHERE name = ?",
+                ('{"fts_content_index": false}', "toggle"),
+            )
+        reindex_content(db_conn, collection_name="toggle")
+        assert search_documents(db_conn, "testing") == []
+
+    def test_reindex_respects_a_raised_size_gate(self, db_conn, tmp_path):
+        create_collection(
+            db_conn, "gate-raise",
+            config={"fts_content_index": True, "fts_content_max_bytes": 5},
+        )
+        f = tmp_path / "f.md"
+        f.write_text("this content exceeds five bytes")
+        register_document(db_conn, "gate-raise", f, "spec", "F")
+        assert search_documents(db_conn, "content") == []  # skipped at registration
+
+        with transaction(db_conn) as cur:
+            cur.execute(
+                "UPDATE collection SET config_json = ? WHERE name = ?",
+                ('{"fts_content_index": true, "fts_content_max_bytes": 1000}', "gate-raise"),
+            )
+        result = reindex_content(db_conn, collection_name="gate-raise")
+        assert result["indexed"] == 1
+        assert [h["title"] for h in search_documents(db_conn, "content")] == ["F"]
+
+    def test_reindex_reports_missing_files_without_crashing(self, db_conn, tmp_path):
+        create_collection(db_conn, "missing-file-col", config={"fts_content_index": True})
+        f = tmp_path / "will-vanish.md"
+        f.write_text("temporary")
+        doc_id = register_document(db_conn, "missing-file-col", f, "spec", "Gone Soon")
+        assert search_documents(db_conn, "temporary") != []  # indexed at registration
+        f.unlink()
+
+        result = reindex_content(db_conn, collection_name="missing-file-col")
+        assert result["indexed"] == 0
+        assert result["missing_files"] == [doc_id]
+        # regression guard: a missing file's previously-indexed content must
+        # not stay searchable indefinitely (it was silently left stale in an
+        # earlier version of this function).
+        assert search_documents(db_conn, "temporary") == []
+
+    def test_sync_document_clears_body_when_file_goes_missing(self, db_conn, tmp_path):
+        create_collection(db_conn, "sync-missing-col", config={"fts_content_index": True})
+        f = tmp_path / "will-vanish.md"
+        f.write_text("temporary content")
+        doc_id = register_document(db_conn, "sync-missing-col", f, "spec", "Gone Soon")
+        assert search_documents(db_conn, "temporary") != []
+        f.unlink()
+
+        result = sync_document(db_conn, doc_id)
+        assert result["missing"] is True
+        assert search_documents(db_conn, "temporary") == []
+
+    def test_reindex_read_error_on_one_document_does_not_abort_the_batch(self, db_conn, tmp_path):
+        create_collection(db_conn, "read-error-col", config={"fts_content_index": True})
+        good = tmp_path / "good.md"
+        good.write_text("perfectly readable content")
+        bad = tmp_path / "bad.md"
+        bad.write_text("placeholder")
+        good_id = register_document(db_conn, "read-error-col", good, "spec", "Good")
+        bad_id = register_document(db_conn, "read-error-col", bad, "spec", "Bad")
+
+        # Corrupt `bad` into invalid UTF-8 *after* registration (registration
+        # already read it fine), so reindex hits a genuine decode failure.
+        bad.write_bytes(b"\xff\xfe\x00broken")
+        good.write_text("perfectly readable content, updated")
+
+        result = reindex_content(db_conn, collection_name="read-error-col")
+        assert result["read_errors"] == [bad_id]
+        # the good document in the same batch must still be indexed — a
+        # single bad file must not roll back the whole reindex (an earlier
+        # version held one write transaction open across the entire loop).
+        assert result["indexed"] == 1
+        assert [h["title"] for h in search_documents(db_conn, "updated")] == ["Good"]
+        # the bad document's prior (registration-time) body is left as-is,
+        # not silently cleared on an unverified read failure.
+        assert [h["title"] for h in search_documents(db_conn, "placeholder")] == ["Bad"]
+
+    def test_reindex_without_collection_name_covers_every_collection(self, db_conn, sample_docs):
+        create_collection(db_conn, "col-a", config={"fts_content_index": True})
+        create_collection(db_conn, "col-b", config={"fts_content_index": True})
+        register_document(db_conn, "col-a", sample_docs["doc1"], "spec", "A")
+        register_document(db_conn, "col-b", sample_docs["doc2"], "spec", "B")
+        result = reindex_content(db_conn)
+        assert result["indexed"] == 2
+
+
+class TestZeroResultDiagnostics:
+    """Proposal B item 2: actionable output instead of a bare zero count."""
+
+    def test_fts_zero_result_reports_fields_searched(self, db_conn, collection):
+        diag = diagnose_zero_results(db_conn, fts_query="nope")
+        assert "fields_searched" in diag
+        assert "title" in diag["fields_searched"]
+
+    def test_fts_zero_result_or_relaxed_retry_finds_partial_matches(self, db_conn, collection, sample_docs):
+        register_document(db_conn, "test-collection", sample_docs["doc1"], "spec", "Testing Deployment")
+        # the exact phrase doesn't exist verbatim as a single match target,
+        # but an OR-relaxed retry over its tokens should surface the doc.
+        assert search_documents(db_conn, "Testing Deployment Nonexistent") == []
+        diag = diagnose_zero_results(db_conn, fts_query="Testing Deployment Nonexistent")
+        assert any(h["title"] == "Testing Deployment" for h in diag["or_relaxed_hits"])
+
+    def test_tag_query_zero_result_reports_nearest_tags_and_doc_type_counts(
+        self, db_conn, collection, sample_docs
+    ):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "D1",
+            tags={"stage": "implementation"},
+        )
+        diag = diagnose_zero_results(db_conn, collection_name="test-collection")
+        assert ("stage", "implementation", 1) in diag["nearest_tags"]
+        assert ("spec", 1) in diag["doc_type_counts"]
+
+    def test_diagnostics_scoped_to_collection_when_given(self, db_conn, sample_docs):
+        create_collection(db_conn, "col-a", config={})
+        create_collection(db_conn, "col-b", config={})
+        register_document(db_conn, "col-a", sample_docs["doc1"], "spec", "A", tags={"k": "a-only"})
+        register_document(db_conn, "col-b", sample_docs["doc2"], "plan", "B", tags={"k": "b-only"})
+
+        diag = diagnose_zero_results(db_conn, collection_name="col-a")
+        tag_values = {v for _, v, _ in diag["nearest_tags"]}
+        assert "a-only" in tag_values
+        assert "b-only" not in tag_values
+        doc_types = {t for t, _ in diag["doc_type_counts"]}
+        assert doc_types == {"spec"}
 
 
 class TestSync:

@@ -6,6 +6,7 @@ Optional fix=True enables safe auto-repairs (L0 regen, L1 cache generation).
 Read-only lint must not mutate the knowledge base.
 """
 
+import json
 import logging
 import time
 import sqlite3
@@ -21,6 +22,19 @@ logger = logging.getLogger(__name__)
 # threshold aligned with that observed release shape so lint highlights real
 # regressions instead of a known-good steady state.
 DEFAULT_L0_PERFORMANCE_THRESHOLD_MS = 300.0
+
+# Tag-vocabulary drift thresholds (Proposal B item 4). A tag_key is
+# considered "common" for a doc_type once it covers more than
+# TAG_DRIFT_HIGH_THRESHOLD of that doc_type's instances, and "rare" once it
+# covers fewer than TAG_DRIFT_LOW_THRESHOLD. Flagging requires *both*: a
+# tag_key that is common for one doc_type but rare for another, within the
+# same collection. The gap between the two thresholds (50% vs 10%) is
+# deliberately wide so a handful of stray tagged/untagged documents doesn't
+# trip the check — it's sized to catch the evidenced case this lint targets
+# ("phase= tags chunk-plans only 4/201 times, ~2%, while other doc_types in
+# the same collection cluster well above 50%"), not marginal noise.
+TAG_DRIFT_HIGH_THRESHOLD = 0.5
+TAG_DRIFT_LOW_THRESHOLD = 0.1
 
 
 def check_orphan_entities(conn: sqlite3.Connection) -> list[dict]:
@@ -205,6 +219,85 @@ def check_missing_documents(conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def check_tag_vocabulary_drift(
+    conn: sqlite3.Connection,
+    high_threshold: float = TAG_DRIFT_HIGH_THRESHOLD,
+    low_threshold: float = TAG_DRIFT_LOW_THRESHOLD,
+) -> list[dict]:
+    """SCN-5.1-13: Flag tag-usage drift across doc_types within a collection.
+
+    Mechanizes a manual audit pattern: collections declare their tag
+    vocabulary as a flat `config["tag_keys"]` list (no per-doc_type
+    requirement mapping — the core stays collection-agnostic), so nothing
+    today catches a tag_key that is heavily used on one doc_type but almost
+    never used on another doc_type in the *same* collection, even though
+    both doc_types share the same declared vocabulary. That drift is easy
+    to miss by hand and easy to compute mechanically.
+
+    For each collection with a non-empty `config["tag_keys"]`, and for each
+    of its declared tag_keys, compute the fraction of each doc_type's
+    *active* documents (`v_active_documents` — excludes superseded/archived)
+    that actually carry that tag_key. A doc_type is only compared against
+    other doc_types in the same collection; a collection with fewer than
+    two doc_types has nothing to compare and is skipped. Flag every
+    (high, low) doc_type pair where the tag_key covers more than
+    `high_threshold` of the high doc_type's instances but less than
+    `low_threshold` of the low doc_type's instances.
+    """
+    issues: list[dict] = []
+    collections = conn.execute(
+        "SELECT collection_id, name, config_json FROM collection"
+    ).fetchall()
+
+    for col in collections:
+        config = json.loads(col["config_json"] or "{}")
+        tag_keys = config.get("tag_keys")
+        if not tag_keys:
+            continue
+
+        doc_type_rows = conn.execute(
+            "SELECT doc_type, COUNT(*) AS n FROM v_active_documents "
+            "WHERE collection_name = ? GROUP BY doc_type",
+            (col["name"],),
+        ).fetchall()
+        doc_type_totals = {r["doc_type"]: r["n"] for r in doc_type_rows}
+        if len(doc_type_totals) < 2:
+            continue  # nothing to compare a single doc_type's usage against
+
+        for tag_key in tag_keys:
+            coverage: dict[str, float] = {}
+            for doc_type, total in doc_type_totals.items():
+                covered = conn.execute(
+                    """SELECT COUNT(DISTINCT d.document_id) AS n
+                       FROM v_active_documents d
+                       JOIN document_tag t ON t.document_id = d.document_id
+                       WHERE d.collection_name = ? AND d.doc_type = ? AND t.tag_key = ?""",
+                    (col["name"], doc_type, tag_key),
+                ).fetchone()["n"]
+                coverage[doc_type] = covered / total if total else 0.0
+
+            high_types = [dt for dt, frac in coverage.items() if frac > high_threshold]
+            low_types = [dt for dt, frac in coverage.items() if frac < low_threshold]
+
+            for high_dt in high_types:
+                for low_dt in low_types:
+                    if high_dt == low_dt:
+                        continue
+                    issues.append({
+                        "severity": "warning",
+                        "collection": col["name"],
+                        "tag_key": tag_key,
+                        "message": (
+                            f"Tag {tag_key!r} in collection {col['name']!r} covers "
+                            f"{coverage[high_dt]:.0%} of {high_dt!r} documents but "
+                            f"only {coverage[low_dt]:.0%} of {low_dt!r} documents "
+                            f"— possible tag-vocabulary drift."
+                        ),
+                    })
+
+    return issues
+
+
 def check_l0_performance(
     conn: sqlite3.Connection,
     threshold_ms: float = DEFAULT_L0_PERFORMANCE_THRESHOLD_MS,
@@ -243,6 +336,7 @@ def run_all_checks(
     results["unbounded_clusters"] = check_unbounded_clusters(conn)
     results["document_drift"] = check_document_drift(conn)
     results["missing_documents"] = check_missing_documents(conn)
+    results["tag_vocabulary_drift"] = check_tag_vocabulary_drift(conn)
     results["l0_performance"] = check_l0_performance(conn)
 
     total_warnings = 0

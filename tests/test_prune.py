@@ -4,8 +4,18 @@ import pytest
 
 from src.db import get_connection, init_db, transaction
 from src.project import generate_l0, read_cache, read_l0
-from src.prune import prune_expired_claims
+from src.prune import prune_expired_claims, prune_query_log
 from src.utils import hashing, ulid
+
+
+def _insert_ingest_log(conn, operation, created_at, summary="test"):
+    log_id = ulid.generate()
+    with transaction(conn) as cur:
+        cur.execute(
+            "INSERT INTO ingest_log (log_id, operation, summary, created_at) VALUES (?, ?, ?, ?)",
+            (log_id, operation, summary, created_at),
+        )
+    return log_id
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -214,3 +224,47 @@ class TestNoOpPrune:
         result = prune_expired_claims(db_conn)
         assert result["claims_pruned"] == 0
         assert result["clusters_cleaned"] == 0
+
+
+# ── prune_query_log (Fable review finding 4 follow-up) ──────────
+
+class TestPruneQueryLog:
+    def test_deletes_query_rows_older_than_retention(self, db_conn):
+        old_id = _insert_ingest_log(db_conn, "query", "2000-01-01T00:00:00Z")
+
+        deleted = prune_query_log(db_conn, retention_days=30)
+        assert deleted == 1
+
+        row = db_conn.execute(
+            "SELECT * FROM ingest_log WHERE log_id = ?", (old_id,)
+        ).fetchone()
+        assert row is None
+
+    def test_preserves_query_rows_within_retention(self, db_conn):
+        from datetime import datetime, timezone
+
+        recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent_id = _insert_ingest_log(db_conn, "query", recent)
+
+        deleted = prune_query_log(db_conn, retention_days=30)
+        assert deleted == 0
+
+        row = db_conn.execute(
+            "SELECT * FROM ingest_log WHERE log_id = ?", (recent_id,)
+        ).fetchone()
+        assert row is not None
+
+    def test_never_touches_non_query_operations(self, db_conn):
+        register_id = _insert_ingest_log(db_conn, "register", "2000-01-01T00:00:00Z")
+
+        deleted = prune_query_log(db_conn, retention_days=30)
+        assert deleted == 0
+
+        row = db_conn.execute(
+            "SELECT * FROM ingest_log WHERE log_id = ?", (register_id,)
+        ).fetchone()
+        assert row is not None
+
+    def test_no_query_rows_returns_zero(self, db_conn):
+        deleted = prune_query_log(db_conn)
+        assert deleted == 0

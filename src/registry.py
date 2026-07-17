@@ -14,6 +14,11 @@ from src.utils import hashing, tokens, ulid
 
 logger = logging.getLogger(__name__)
 
+#: Default per-document size gate for opt-in FTS content indexing (bytes,
+#: UTF-8 encoded). A collection overrides this via
+#: `config["fts_content_max_bytes"]`. See `_content_index_body`.
+DEFAULT_FTS_CONTENT_MAX_BYTES = 200_000
+
 
 # ── Collection management ──────────────────────────────────────
 
@@ -101,6 +106,41 @@ def _normalize_tags(
 # ── Document registration ─────────────────────────────────────
 
 
+def _content_index_body(col_config: dict, content: str) -> str | None:
+    """Whether/what to index into `document_fts.body` for this collection.
+
+    Opt-in, size-gated content indexing (Proposal B item 1): a collection
+    must set `config["fts_content_index"] = true`; documents whose UTF-8
+    byte length exceeds `config["fts_content_max_bytes"]` (default
+    `DEFAULT_FTS_CONTENT_MAX_BYTES`) are skipped rather than truncated, so a
+    partial-content search hit never silently misrepresents what was
+    actually indexed. Returns `content` verbatim to index, or `None` to
+    leave `body` empty (the default — see the `document_fts` schema
+    comment).
+    """
+    if not col_config.get("fts_content_index"):
+        return None
+    max_bytes = col_config.get("fts_content_max_bytes", DEFAULT_FTS_CONTENT_MAX_BYTES)
+    if len(content.encode("utf-8")) > max_bytes:
+        return None
+    return content
+
+
+def _set_fts_body(cur: sqlite3.Cursor, document_id: str, body: str) -> None:
+    """Write opt-in indexed content into the FTS row for `document_id`.
+
+    Always a separate, explicit statement — never folded into the
+    trigger-driven title/external_id/doc_type population (see the
+    `document_fts` schema comment for why: triggers only ever see
+    `document`'s own columns, and content lives on disk, not in a column).
+    """
+    cur.execute(
+        "UPDATE document_fts SET body = ? "
+        "WHERE rowid = (SELECT rowid FROM document WHERE document_id = ?)",
+        (body, document_id),
+    )
+
+
 def register_document(
     conn: sqlite3.Connection,
     collection_name: str,
@@ -143,6 +183,7 @@ def register_document(
     token_count = tokens.count_tokens(content, encoding)
     document_id = ulid.generate()
     metadata_json = json.dumps(metadata or {})
+    fts_body = _content_index_body(col["config"], content)
 
     with transaction(conn) as cur:
         cur.execute(
@@ -166,6 +207,9 @@ def register_document(
 
         if tags:
             _insert_tags(cur, document_id, tags)
+
+        if fts_body is not None:
+            _set_fts_body(cur, document_id, fts_body)
 
     logger.info("Registered document %r (%s) in %r", title, document_id, collection_name)
     return document_id
@@ -233,16 +277,44 @@ def get_by_external_id(
     return _enrich_document(conn, dict(row))
 
 
+def _escape_like(value: str) -> str:
+    """Escape SQLite LIKE wildcards (`%`, `_`) in a caller-supplied literal.
+
+    Used for tag-value prefix matching (Proposal B item 3): a real tag value
+    that happens to contain a literal `%` or `_` must not be interpreted as
+    an unintended wildcard once it is turned into a `LIKE 'prefix%'` pattern.
+    Pairs with `ESCAPE '\\'` on the SQL side.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def query_documents(
     conn: sqlite3.Connection,
     collection_name: str | None = None,
     doc_type: str | None = None,
     tags: dict[str, str] | None = None,
+    tag_prefixes: dict[str, str] | None = None,
     status: str | None = None,
 ) -> list[dict]:
     """Query documents with optional filters. Returns list of dicts with tags.
 
-    tags filter: {"stage": "implementation"} matches documents tagged stage=implementation.
+    tags filter: {"stage": "implementation"} matches documents tagged
+    stage=implementation exactly. This remains the default, unchanged
+    behavior.
+
+    tag_prefixes filter (Proposal B item 3): {"chunk": "7.1"} matches any
+    document tagged chunk=<value> where <value> starts with "7.1" — e.g.
+    "7.1", "7.1.16", "7.1.2-rc". This exists for hierarchical/dotted
+    vocabularies where real deployments tag documents coarser ("chunk=7.1")
+    than a caller's query is scoped ("chunk=7.1.16"): an exact-match query
+    against the fine-grained value would otherwise return zero rows even
+    though the coarser tag is a legitimate match. Implemented as a bound
+    `LIKE` parameter (never string-concatenated SQL); any `%` or `_`
+    literally present in the supplied prefix is escaped via `_escape_like`
+    so it cannot behave as an unintended wildcard. `tags` and
+    `tag_prefixes` may be combined (AND semantics across both, same as
+    combining `tags` with `doc_type`/`status`); a key present in both is
+    treated as two independent conditions.
     """
     sql = "SELECT d.* FROM document d"
     joins = []
@@ -271,6 +343,15 @@ def query_documents(
             conditions.append(f"{alias}.tag_key = ? AND {alias}.tag_value = ?")
             params.extend([key, value])
 
+    if tag_prefixes:
+        for i, (key, prefix) in enumerate(tag_prefixes.items()):
+            alias = f"tp{i}"
+            joins.append(
+                f"JOIN document_tag {alias} ON {alias}.document_id = d.document_id"
+            )
+            conditions.append(f"{alias}.tag_key = ? AND {alias}.tag_value LIKE ? ESCAPE '\\'")
+            params.extend([key, _escape_like(prefix) + "%"])
+
     sql += " " + " ".join(joins)
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
@@ -294,8 +375,27 @@ def _sanitize_fts_query(query: str) -> str:
     return re.sub(r"[^\w\s]", " ", query)
 
 
+#: The document_fts columns actually searched by every `--fts`/`search_documents`
+#: call. `body` only has content for documents in a collection that opted into
+#: content indexing (`config["fts_content_index"]`) and were within the size
+#: gate — see `_content_index_body`. Exposed as a constant (rather than only
+#: prose) so a caller/CLI can report exactly what was searched, closing the
+#: honesty gap at both the mechanism and the documentation layer (Proposal B
+#: item 1).
+FTS_SEARCHED_FIELDS = ("title", "external_id", "doc_type", "body (opt-in, per-collection)")
+
+
 def search_documents(conn: sqlite3.Connection, query: str) -> list[dict]:
-    """Full-text search across documents using FTS5. Returns matching documents."""
+    """Full-text search across documents using FTS5.
+
+    Searches `title`, `external_id`, `doc_type`, and — for documents in a
+    collection that opted into content indexing — `body` (see
+    `FTS_SEARCHED_FIELDS`, `_content_index_body`). A collection that has not
+    opted in is searched on title/external_id/doc_type only; this was the
+    *entire* prior behavior, silently, for every collection — now it is an
+    explicit, reportable per-collection choice rather than an undocumented
+    universal limitation.
+    """
     safe_query = _sanitize_fts_query(query)
     rows = conn.execute(
         """SELECT d.* FROM document d
@@ -305,6 +405,100 @@ def search_documents(conn: sqlite3.Connection, query: str) -> list[dict]:
         (safe_query,),
     ).fetchall()
     return [_enrich_document(conn, dict(r)) for r in rows]
+
+
+def _or_relax(safe_query: str) -> str:
+    """Turn implicit-AND bareword tokens into an OR query, for the zero-result retry.
+
+    `_sanitize_fts_query` already strips FTS5-significant punctuation to
+    spaces; FTS5 implicitly ANDs bareword tokens, so a multi-word or
+    hyphenated query (`"phase 5 rollout"`, sanitized `"AC-C0-4"` -> `"AC C0
+    4"`) frequently zeros out even when a document matches most of the
+    tokens. Joining with `OR` is strictly broader — used only for the
+    zero-result diagnostic retry, never as the primary search semantics
+    (an OR-widened *primary* result set would be a silent behavior change).
+
+    Each token is wrapped in double quotes so FTS5 treats it as a literal
+    phrase, never a bareword operator keyword. `_sanitize_fts_query` strips
+    punctuation but deliberately does not touch bareword tokens that happen
+    to spell `AND`/`OR`/`NOT`/`NEAR` — an unquoted `"governance AND
+    rollout"` relaxed to `governance OR AND OR rollout` is not valid FTS5
+    syntax (`AND` parses as an operator, not a search term) and raised
+    `sqlite3.OperationalError` here, in the diagnostic path built
+    specifically to keep a zero-result query from being a dead end.
+    """
+    parts = safe_query.split()
+    return " OR ".join(f'"{part}"' for part in parts) if parts else safe_query
+
+
+def diagnose_zero_results(
+    conn: sqlite3.Connection,
+    *,
+    fts_query: str | None = None,
+    collection_name: str | None = None,
+    limit: int = 10,
+) -> dict:
+    """Assemble actionable diagnostics after a query/search call returns zero hits.
+
+    A bare `0 document(s) found` is the direct trigger of the fallback
+    pattern (agents abandon after 1-2 retries and fall through to
+    grep/find/full-file reads — see the evidence in
+    `astaire-schema-reform-plan.md` §1b) — this exists to give the caller
+    (typically the CLI) something actionable *before* it gives up.
+
+    Returns:
+        fields_searched: FTS_SEARCHED_FIELDS, for FTS calls (else omitted).
+        or_relaxed_hits: docs found by an OR-relaxed retry of the same FTS
+            terms (only when `fts_query` is given) — capped at `limit`.
+        nearest_tags: the `limit` most common (tag_key, tag_value, count)
+            triples actually present, scoped to `collection_name` if given.
+        doc_type_counts: (doc_type, count) pairs actually present, scoped to
+            `collection_name` if given, most common first.
+    """
+    diagnostics: dict = {}
+
+    if fts_query is not None:
+        diagnostics["fields_searched"] = FTS_SEARCHED_FIELDS
+        relaxed = _or_relax(_sanitize_fts_query(fts_query))
+        try:
+            rows = conn.execute(
+                """SELECT d.* FROM document d
+                   JOIN document_fts ON document_fts.rowid = d.rowid
+                   WHERE document_fts MATCH ?
+                   ORDER BY rank LIMIT ?""",
+                (relaxed, limit),
+            ).fetchall()
+            diagnostics["or_relaxed_hits"] = [_enrich_document(conn, dict(r)) for r in rows]
+        except sqlite3.OperationalError as exc:
+            # Best-effort diagnostic: a zero-result report must never itself
+            # crash. Quoting each token in _or_relax already prevents the
+            # known cause (bareword AND/OR/NOT), but this stays fail-soft
+            # against any FTS5 syntax edge case neither of us has thought of.
+            logger.warning("OR-relaxed retry for %r failed: %s", fts_query, exc)
+            diagnostics["or_relaxed_hits"] = []
+
+    tag_sql = "SELECT t.tag_key, t.tag_value, COUNT(*) AS n FROM document_tag t"
+    type_sql = "SELECT d.doc_type, COUNT(*) AS n FROM document d"
+    params: list = []
+    if collection_name:
+        tag_sql += (
+            " JOIN document d ON d.document_id = t.document_id"
+            " JOIN collection c ON c.collection_id = d.collection_id"
+            " WHERE c.name = ?"
+        )
+        type_sql += " JOIN collection c ON c.collection_id = d.collection_id WHERE c.name = ?"
+        params = [collection_name]
+    tag_sql += " GROUP BY t.tag_key, t.tag_value ORDER BY n DESC LIMIT ?"
+    type_sql += " GROUP BY d.doc_type ORDER BY n DESC LIMIT ?"
+
+    diagnostics["nearest_tags"] = [
+        (r["tag_key"], r["tag_value"], r["n"])
+        for r in conn.execute(tag_sql, [*params, limit]).fetchall()
+    ]
+    diagnostics["doc_type_counts"] = [
+        (r["doc_type"], r["n"]) for r in conn.execute(type_sql, [*params, limit]).fetchall()
+    ]
+    return diagnostics
 
 
 def _enrich_document(conn: sqlite3.Connection, doc: dict) -> dict:
@@ -338,7 +532,9 @@ def sync_document(
     If the file is missing, marks status='archived'.
     """
     row = conn.execute(
-        "SELECT file_path, content_hash, status, title FROM document WHERE document_id = ?",
+        """SELECT d.file_path, d.content_hash, d.status, d.title, c.config_json
+           FROM document d JOIN collection c ON c.collection_id = d.collection_id
+           WHERE d.document_id = ?""",
         (document_id,),
     ).fetchone()
     if row is None:
@@ -346,6 +542,7 @@ def sync_document(
 
     path = Path(row["file_path"])
     old_hash = row["content_hash"]
+    col_config = json.loads(row["config_json"] or "{}")
     base = {"title": row["title"], "file_path": str(row["file_path"])}
 
     if not path.exists():
@@ -355,6 +552,11 @@ def sync_document(
                     "UPDATE document SET status = 'archived', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE document_id = ?",
                     (document_id,),
                 )
+                # The file is gone; any previously-indexed content is now
+                # unverifiable and must not stay searchable indefinitely on
+                # an archived row (search_documents does not filter by
+                # status) — clear it in the same transaction as the archive.
+                _set_fts_body(cur, document_id, "")
             logger.warning("Document file missing, archived: %s", path)
         return {**base, "changed": True, "old_hash": old_hash, "new_hash": None, "missing": True}
 
@@ -364,6 +566,7 @@ def sync_document(
 
     content = path.read_text(encoding="utf-8")
     token_count = tokens.count_tokens(content)
+    fts_body = _content_index_body(col_config, content)
     with transaction(conn) as cur:
         cur.execute(
             """UPDATE document
@@ -372,6 +575,10 @@ def sync_document(
                WHERE document_id = ?""",
             (new_hash, token_count, document_id),
         )
+        # content changed: re-index (or clear, if the collection opted out or
+        # the file now exceeds the size gate) the opt-in FTS body in step —
+        # never leave a stale body indexed against changed content.
+        _set_fts_body(cur, document_id, fts_body or "")
     logger.info("Document updated (hash changed): %s", document_id)
     return {**base, "changed": True, "old_hash": old_hash, "new_hash": new_hash, "missing": False}
 
@@ -408,6 +615,111 @@ def sync_all(conn: sqlite3.Connection) -> list[dict]:
             result["document_id"] = row["document_id"]
             changes.append(result)
     return changes
+
+
+def reindex_content(
+    conn: sqlite3.Connection, collection_name: str | None = None
+) -> dict:
+    """Force-recompute `document_fts.body` for every eligible document.
+
+    `sync_document`/`sync_all` only re-index `body` as a side effect of a
+    detected `content_hash` change — a real gap found while live-testing
+    this feature against a populated database: a collection that opts into
+    `fts_content_index` (or raises/lowers `fts_content_max_bytes`) *after*
+    its documents are already registered has no other path to actually get
+    them indexed, since editing `collection.config_json` never changes any
+    document's file content or hash. This is that backfill path — it honors
+    each document's own collection's *current* config, regardless of
+    whether the file has changed since registration.
+
+    Returns `{"indexed": N, "skipped_over_gate": N, "skipped_not_opted_in":
+    N, "missing_files": [document_id, ...], "read_errors": [document_id,
+    ...]}`. A document whose collection is not (or no longer) opted in,
+    whose content now exceeds the size gate, whose file is missing, or
+    whose file could not be read has its `body` explicitly cleared (never
+    left stale) — except a read error, where the prior `body` is left
+    untouched, since a transient read failure is not evidence the content
+    is actually gone (unlike a missing file or an explicit opt-out/gate
+    change).
+
+    Each document is read from disk and written in its own short
+    transaction — file I/O never happens while a write transaction is
+    open (this repo's own rule: "do not hold transactions open while
+    reading files from disk"; an earlier version of this function violated
+    it by wrapping the entire loop, including every `path.read_text()`
+    call, in one transaction — a real write-lock-duration and
+    single-bad-file-rolls-back-everything problem on a deployment with
+    hundreds of documents). A file that fails to decode no longer aborts
+    the whole batch; it is recorded in `read_errors` and skipped.
+    """
+    sql = (
+        "SELECT d.document_id, d.file_path, c.config_json "
+        "FROM document d JOIN collection c ON c.collection_id = d.collection_id"
+    )
+    params: list = []
+    if collection_name:
+        sql += " WHERE c.name = ?"
+        params.append(collection_name)
+    rows = conn.execute(sql, params).fetchall()
+
+    indexed = 0
+    skipped_over_gate = 0
+    skipped_not_opted_in = 0
+    missing_files: list[str] = []
+    read_errors: list[str] = []
+
+    for row in rows:
+        config = json.loads(row["config_json"] or "{}")
+        if not config.get("fts_content_index"):
+            skipped_not_opted_in += 1
+            # A prior opt-in may have left real content indexed; clear it
+            # so an opt-out actually takes effect (never leave a stale
+            # body indexed against a collection's current config).
+            with transaction(conn) as cur:
+                _set_fts_body(cur, row["document_id"], "")
+            continue
+
+        path = Path(row["file_path"])
+        if not path.exists():
+            missing_files.append(row["document_id"])
+            # The file is gone; any previously-indexed content is no
+            # longer verifiable and must not stay searchable indefinitely.
+            with transaction(conn) as cur:
+                _set_fts_body(cur, row["document_id"], "")
+            continue
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            read_errors.append(row["document_id"])
+            logger.warning(
+                "Reindex: could not read %s for document %s (%s); leaving its "
+                "existing indexed content untouched",
+                path, row["document_id"], exc,
+            )
+            continue
+
+        body = _content_index_body(config, content)
+        with transaction(conn) as cur:
+            if body is None:
+                skipped_over_gate += 1
+                _set_fts_body(cur, row["document_id"], "")
+            else:
+                _set_fts_body(cur, row["document_id"], body)
+                indexed += 1
+
+    logger.info(
+        "Reindexed content for %d document(s)%s",
+        indexed,
+        f" in collection {collection_name!r}" if collection_name else "",
+    )
+    return {
+        "indexed": indexed,
+        "skipped_over_gate": skipped_over_gate,
+        "skipped_not_opted_in": skipped_not_opted_in,
+        "missing_files": missing_files,
+        "read_errors": read_errors,
+    }
 
 
 # ── Context assembly ───────────────────────────────────────────

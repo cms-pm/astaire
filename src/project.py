@@ -121,11 +121,19 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
         contra_lines.append(f"- {row['entity_a_name']} vs {row['entity_b_name']}: {desc}")
     contra_section = "\n".join(contra_lines) if contra_lines else "- (none)"
 
-    # Recent activity (last 5 ingest_log entries)
+    # Recent activity (last 5 ingest_log entries). 'query' is excluded
+    # alongside the pre-existing 'recompile' exclusion: query-operation
+    # logging (Proposal B item 5) fires on every read-only `astaire query`
+    # call, unlike every other operation here, which represents a real
+    # state change — without this exclusion, a handful of queries push
+    # every genuine register/ingest/lint entry out of this 5-row window.
+    # The full history (queries included) is still available in the
+    # ingest_log table itself and the wiki timeline (src/export.py) — this
+    # only trims the short "what just happened" summary.
     activity_lines = []
     log_rows = conn.execute(
         "SELECT operation, summary, created_at FROM ingest_log "
-        "WHERE operation != 'recompile' ORDER BY created_at DESC LIMIT 5"
+        "WHERE operation NOT IN ('recompile', 'query') ORDER BY created_at DESC LIMIT 5"
     ).fetchall()
     for row in log_rows:
         activity_lines.append(f"- [{row['created_at']}] {row['operation']}: {row['summary'] or 'no summary'}")

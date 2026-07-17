@@ -400,3 +400,25 @@ class TestL0AuditTrail:
             "SELECT COUNT(*) FROM ingest_log WHERE operation = 'recompile'"
         ).fetchone()[0]
         assert rows == 2
+
+    def test_recent_activity_excludes_query_operations(self, db_conn):
+        # Query-operation logging (Proposal B item 5) fires on every
+        # read-only `astaire query` call, unlike every other ingest_log
+        # entry here — without this exclusion a handful of queries would
+        # push real register/ingest/lint activity out of L0's 5-row window.
+        from src.utils import ulid
+
+        db_conn.execute(
+            "INSERT INTO ingest_log (log_id, operation, summary) VALUES (?, 'register', 'a real registration')",
+            (ulid.generate(),),
+        )
+        for _ in range(5):
+            db_conn.execute(
+                "INSERT INTO ingest_log (log_id, operation, summary) VALUES (?, 'query', 'noise')",
+                (ulid.generate(),),
+            )
+        db_conn.commit()
+
+        content = generate_l0(db_conn)
+        assert "a real registration" in content
+        assert "noise" not in content

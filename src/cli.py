@@ -1,6 +1,7 @@
 """Astaire CLI — command-line interface for the memory palace.
 
-Subcommands: init, status, scan, query, lint, export, prune, sync, ingest, startup, bench.
+Subcommands: init, status, scan, query, lint, export, prune, sync, reindex-content,
+ingest, startup, bench.
 All commands use the production DB at db/memory_palace.db by default.
 """
 
@@ -146,9 +147,56 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 print(f"  archived             {c['title']}")
 
 
+def _write_query_log(conn: sqlite3.Connection, summary: str) -> str:
+    """Write an `operation='query'` ingest_log entry (Proposal B item 5).
+
+    `ingest_log.operation`'s CHECK constraint has permitted `'query'` since
+    the schema was written, but nothing ever wrote it — there was no
+    read-side usage record anywhere. `cmd_query` is the natural place: it
+    already has the full call arguments and the result count in hand right
+    after calling `query_documents`/`search_documents`. Follows the same
+    duplicated-locally `_write_ingest_log`-style helper idiom as
+    `ingest.py` rather than trying to unify the two — that's the
+    established pattern in this codebase. All numeric counters stay at
+    their column defaults (0); this operation didn't write anything, so
+    repurposing an unrelated write-side counter (e.g. documents_registered)
+    to mean "hit count" would be misleading. The hit count instead lives in
+    `summary`, in plain text, alongside what was actually searched/filtered.
+    """
+    from src.db import transaction
+    from src.utils import ulid
+
+    log_id = ulid.generate()
+    with transaction(conn) as cur:
+        cur.execute(
+            "INSERT INTO ingest_log (log_id, operation, summary) VALUES (?, 'query', ?)",
+            (log_id, summary),
+        )
+    return log_id
+
+
+def _describe_query(args: argparse.Namespace, hit_count: int) -> str:
+    """Render the filters/query actually used for `_write_query_log`'s summary."""
+    if args.fts:
+        return f"Query (fts={args.fts!r}): {hit_count} hit(s)"
+    parts = []
+    if args.collection:
+        parts.append(f"collection={args.collection}")
+    if args.type:
+        parts.append(f"type={args.type}")
+    if args.status:
+        parts.append(f"status={args.status}")
+    if args.tag:
+        parts.append(f"tag={','.join(args.tag)}")
+    if getattr(args, "tag_prefix", None):
+        parts.append(f"tag_prefix={','.join(args.tag_prefix)}")
+    filters = ", ".join(parts) if parts else "no filters"
+    return f"Query ({filters}): {hit_count} hit(s)"
+
+
 def cmd_query(args: argparse.Namespace) -> None:
     """Query documents from the registry."""
-    from src.registry import query_documents, search_documents
+    from src.registry import diagnose_zero_results, query_documents, search_documents
 
     with managed_connection(args.db) as conn:
         if args.fts:
@@ -160,13 +208,22 @@ def cmd_query(args: argparse.Namespace) -> None:
                 for t in args.tag:
                     key, _, value = t.partition("=")
                     tags[key] = value
+            tag_prefixes = None
+            if getattr(args, "tag_prefix", None):
+                tag_prefixes = {}
+                for t in args.tag_prefix:
+                    key, _, value = t.partition("=")
+                    tag_prefixes[key] = value
             docs = query_documents(
                 conn,
                 collection_name=args.collection,
                 doc_type=args.type,
                 tags=tags,
+                tag_prefixes=tag_prefixes,
                 status=args.status,
             )
+
+        _write_query_log(conn, _describe_query(args, len(docs)))
 
         if args.json:
             for d in docs:
@@ -183,6 +240,36 @@ def cmd_query(args: argparse.Namespace) -> None:
                                  for k, v in d["tags"].items()]
                     tags_str = f"  [{', '.join(tag_parts)}]"
                 print(f"  {d['doc_type']:20s} {d['title']}{ext}{tags_str}")
+
+            if not docs:
+                _print_zero_result_diagnostics(
+                    diagnose_zero_results(
+                        conn,
+                        fts_query=args.fts,
+                        collection_name=args.collection,
+                    )
+                )
+
+
+def _print_zero_result_diagnostics(diagnostics: dict) -> None:
+    """Render `registry.diagnose_zero_results`' output for a human at the CLI.
+
+    Proposal B item 2: a bare zero-result count is the direct trigger of the
+    grep/find fallback pattern this diagnostic exists to interrupt.
+    """
+    if "fields_searched" in diagnostics:
+        print(f"  searched fields: {', '.join(diagnostics['fields_searched'])}")
+    or_hits = diagnostics.get("or_relaxed_hits")
+    if or_hits:
+        print(f"  OR-relaxed retry of the same terms found {len(or_hits)} hit(s):")
+        for d in or_hits[:5]:
+            print(f"    {d['doc_type']:20s} {d['title']}")
+    if diagnostics.get("doc_type_counts"):
+        types = ", ".join(f"{t}={n}" for t, n in diagnostics["doc_type_counts"])
+        print(f"  doc_types in scope: {types}")
+    if diagnostics.get("nearest_tags"):
+        tags = ", ".join(f"{k}={v} ({n})" for k, v, n in diagnostics["nearest_tags"])
+        print(f"  tags actually present: {tags}")
 
 
 def cmd_context(args: argparse.Namespace) -> None:
@@ -240,15 +327,19 @@ def cmd_export(args: argparse.Namespace) -> None:
 
 
 def cmd_prune(args: argparse.Namespace) -> None:
-    """Prune expired claims."""
-    from src.prune import prune_expired_claims
+    """Prune expired claims and stale query-log entries."""
+    from src.prune import prune_expired_claims, prune_query_log
 
     with managed_connection(args.db) as conn:
         stats = prune_expired_claims(conn)
-        if stats["claims_pruned"] == 0:
+        query_log_pruned = prune_query_log(conn)
+        if stats["claims_pruned"] == 0 and query_log_pruned == 0:
             print("Nothing to prune.")
         else:
-            print(f"Pruned {stats['claims_pruned']} claim(s), cleaned {stats['clusters_cleaned']} cluster assignment(s)")
+            if stats["claims_pruned"]:
+                print(f"Pruned {stats['claims_pruned']} claim(s), cleaned {stats['clusters_cleaned']} cluster assignment(s)")
+            if query_log_pruned:
+                print(f"Pruned {query_log_pruned} stale query log entr{'y' if query_log_pruned == 1 else 'ies'}")
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
@@ -275,6 +366,29 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 title = c.get("title", c["document_id"])
                 path = c.get("file_path", "")
                 print(f"  [{status}] {title}  ({path})")
+
+
+def cmd_reindex_content(args: argparse.Namespace) -> None:
+    """Force-recompute document_fts.body for every eligible document.
+
+    The backfill path for a collection that opts into fts_content_index (or
+    changes fts_content_max_bytes) after its documents are already
+    registered — sync alone never reaches those documents, since a
+    config_json edit changes no file's content_hash.
+    """
+    from src.registry import reindex_content
+
+    with managed_connection(args.db) as conn:
+        result = reindex_content(conn, collection_name=args.collection)
+        print(f"Indexed {result['indexed']} document(s)")
+        if result["skipped_not_opted_in"]:
+            print(f"Skipped {result['skipped_not_opted_in']} (collection not opted in)")
+        if result["skipped_over_gate"]:
+            print(f"Skipped {result['skipped_over_gate']} (over fts_content_max_bytes)")
+        for doc_id in result["missing_files"]:
+            print(f"  MISSING file for document {doc_id}")
+        for doc_id in result["read_errors"]:
+            print(f"  READ ERROR for document {doc_id} (existing indexed content left untouched)")
 
 
 def cmd_startup(args: argparse.Namespace) -> None:
@@ -444,7 +558,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("-t", "--type", help="Filter by doc_type")
     p_query.add_argument("-s", "--status", help="Filter by status")
     p_query.add_argument("--tag", action="append", help="Filter by tag (key=value), repeatable")
-    p_query.add_argument("--fts", help="Full-text search query")
+    p_query.add_argument(
+        "--tag-prefix",
+        action="append",
+        help="Filter by tag-value prefix (key=value), repeatable — matches "
+        "documents whose tag_value for key starts with value, e.g. "
+        "--tag-prefix chunk=7.1 matches chunk=7.1, chunk=7.1.16, etc.",
+    )
+    p_query.add_argument(
+        "--fts",
+        help="Full-text search over title/external_id/doc_type, plus document "
+        "body content for collections that opted into content indexing "
+        "(config['fts_content_index']) — see `registry.FTS_SEARCHED_FIELDS`",
+    )
     p_query.add_argument("--json", action="store_true", help="Output as JSON")
 
     # context
@@ -467,6 +593,15 @@ def build_parser() -> argparse.ArgumentParser:
     # sync
     p_sync = sub.add_parser("sync", help="Check for document drift")
     p_sync.add_argument("-c", "--collection", help="Sync only this collection")
+
+    # reindex-content
+    p_reindex = sub.add_parser(
+        "reindex-content",
+        help="Backfill document_fts.body for a collection that opted into fts_content_index",
+    )
+    p_reindex.add_argument(
+        "-c", "--collection", help="Reindex only this collection (default: all)"
+    )
 
     # ingest
     p_ingest = sub.add_parser("ingest", help="Ingest a source document")
@@ -514,6 +649,7 @@ def main() -> None:
         "export": cmd_export,
         "prune": cmd_prune,
         "sync": cmd_sync,
+        "reindex-content": cmd_reindex_content,
         "ingest": cmd_ingest,
         "graphify-import": cmd_graphify_import,
     }
