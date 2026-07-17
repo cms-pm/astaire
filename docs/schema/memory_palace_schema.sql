@@ -276,10 +276,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entity_fts USING fts5(
     tokenize = 'porter unicode61'
 );
 
+-- `body` is opt-in, size-gated content indexing (collection.config_json
+-- "fts_content_index"/"fts_content_max_bytes" — see src/registry.py
+-- register_document). It is NOT populated by a trigger: trigger bodies can
+-- only see NEW.* columns on `document`, and document content lives on disk
+-- (file_path), not in a column, by design (see CLAUDE.md "Do not store raw
+-- source text in the database" — an opt-in, size-gated FTS index entry is a
+-- narrower exception than a general content store). Application code writes
+-- `body` explicitly, immediately after the trigger-driven INSERT below.
 CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
     title,
     external_id,
     doc_type,
+    body,
     tokenize = 'porter unicode61'
 );
 
@@ -325,7 +334,14 @@ BEGIN
     DELETE FROM entity_fts WHERE rowid = OLD.rowid;
 END;
 
--- Document FTS triggers
+-- Document FTS triggers. `body` is deliberately absent from both triggers
+-- below (see the document_fts DDL comment above) — an FTS5 INSERT that omits
+-- a column leaves it as empty string, which is the correct default until
+-- application code opts a document into content indexing. The UPDATE
+-- trigger uses a direct `UPDATE ... SET` (supported natively on a
+-- non-external-content FTS5 table) rather than DELETE+INSERT specifically
+-- so it never touches `body` — a DELETE+INSERT reset would silently wipe
+-- any previously-indexed content on every title/external_id/doc_type edit.
 CREATE TRIGGER IF NOT EXISTS trg_document_fts_insert AFTER INSERT ON document
 BEGIN
     INSERT INTO document_fts(rowid, title, external_id, doc_type)
@@ -334,9 +350,9 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS trg_document_fts_update AFTER UPDATE OF title, external_id, doc_type ON document
 BEGIN
-    DELETE FROM document_fts WHERE rowid = OLD.rowid;
-    INSERT INTO document_fts(rowid, title, external_id, doc_type)
-    VALUES (NEW.rowid, NEW.title, COALESCE(NEW.external_id,''), NEW.doc_type);
+    UPDATE document_fts
+    SET title = NEW.title, external_id = COALESCE(NEW.external_id,''), doc_type = NEW.doc_type
+    WHERE rowid = NEW.rowid;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_document_fts_delete AFTER DELETE ON document

@@ -2,7 +2,13 @@
 
 import sqlite3
 
-from src.db import get_connection, init_db, migrate_source_type_taxonomy, transaction
+from src.db import (
+    get_connection,
+    init_db,
+    migrate_document_fts_body_column,
+    migrate_source_type_taxonomy,
+    transaction,
+)
 
 
 class TestConnection:
@@ -200,6 +206,107 @@ class TestSourceTypeTaxonomyMigration:
                 (generate(), f"t-{stype}", stype, "h"),
             )
         conn.commit()
+        conn.close()
+
+
+class TestDocumentFtsBodyColumnMigration:
+    """Proposal B item 1's schema half: document_fts gains an opt-in `body` column."""
+
+    _OLD_DOCUMENT_FTS_DDL = """
+        CREATE VIRTUAL TABLE document_fts USING fts5(
+            title, external_id, doc_type, tokenize = 'porter unicode61'
+        );
+        CREATE TRIGGER trg_document_fts_insert AFTER INSERT ON document
+        BEGIN
+            INSERT INTO document_fts(rowid, title, external_id, doc_type)
+            VALUES (NEW.rowid, NEW.title, COALESCE(NEW.external_id,''), NEW.doc_type);
+        END;
+        CREATE TRIGGER trg_document_fts_update AFTER UPDATE OF title, external_id, doc_type ON document
+        BEGIN
+            DELETE FROM document_fts WHERE rowid = OLD.rowid;
+            INSERT INTO document_fts(rowid, title, external_id, doc_type)
+            VALUES (NEW.rowid, NEW.title, COALESCE(NEW.external_id,''), NEW.doc_type);
+        END;
+        CREATE TRIGGER trg_document_fts_delete AFTER DELETE ON document
+        BEGIN
+            DELETE FROM document_fts WHERE rowid = OLD.rowid;
+        END;
+    """
+
+    def _legacy_db(self):
+        # Bring up the full current schema, then revert document_fts + its
+        # triggers back to the pre-migration (3-column) shape — every other
+        # table (document, collection, ...) stays current, since only
+        # document_fts's own shape is what the migration detects/rebuilds.
+        conn = get_connection(":memory:")
+        init_db(conn)
+        conn.execute("DROP TRIGGER trg_document_fts_insert")
+        conn.execute("DROP TRIGGER trg_document_fts_update")
+        conn.execute("DROP TRIGGER trg_document_fts_delete")
+        conn.execute("DROP TABLE document_fts")
+        conn.executescript(self._OLD_DOCUMENT_FTS_DDL)
+        conn.commit()
+        return conn
+
+    def test_legacy_db_has_no_body_column(self):
+        conn = self._legacy_db()
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='document_fts'"
+        ).fetchone()
+        assert "body" not in row["sql"]
+        conn.close()
+
+    def test_migration_adds_body_column_and_preserves_existing_rows(self, tmp_path):
+        from src.registry import create_collection, register_document, search_documents
+
+        conn = self._legacy_db()
+        create_collection(conn, "legacy-col", config={})
+        f = tmp_path / "f.md"
+        f.write_text("legacy content")
+        register_document(conn, "legacy-col", f, "spec", "Legacy Doc", external_id="LEG-1")
+
+        ran = migrate_document_fts_body_column(conn)
+        assert ran is True
+
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='document_fts'"
+        ).fetchone()
+        assert "body" in row["sql"]
+
+        # title/external_id/doc_type indexing survived the rebuild.
+        hits = search_documents(conn, "Legacy")
+        assert [h["title"] for h in hits] == ["Legacy Doc"]
+        conn.close()
+
+    def test_migration_is_idempotent(self, tmp_path):
+        conn = self._legacy_db()
+        assert migrate_document_fts_body_column(conn) is True
+        assert migrate_document_fts_body_column(conn) is False
+        conn.close()
+
+    def test_migration_noop_on_fresh_init_db(self, db_conn):
+        assert migrate_document_fts_body_column(db_conn) is False
+
+    def test_body_column_usable_immediately_after_migration(self, tmp_path):
+        from src.registry import create_collection, register_document, search_documents
+
+        conn = self._legacy_db()
+        create_collection(conn, "legacy-col", config={})
+        f = tmp_path / "f.md"
+        f.write_text("legacy content")
+        doc_id = register_document(conn, "legacy-col", f, "spec", "Legacy Doc")
+        migrate_document_fts_body_column(conn)
+
+        # body is empty for the pre-existing row (not backfilled from disk at
+        # migration time — see the function's own docstring), but the column
+        # is immediately writable for any *new* content-indexing write path.
+        conn.execute(
+            "UPDATE document_fts SET body = ? WHERE rowid = "
+            "(SELECT rowid FROM document WHERE document_id = ?)",
+            ("backfilled content", doc_id),
+        )
+        conn.commit()
+        assert [h["title"] for h in search_documents(conn, "backfilled")] == ["Legacy Doc"]
         conn.close()
 
 

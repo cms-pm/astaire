@@ -148,7 +148,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
 def cmd_query(args: argparse.Namespace) -> None:
     """Query documents from the registry."""
-    from src.registry import query_documents, search_documents
+    from src.registry import diagnose_zero_results, query_documents, search_documents
 
     with managed_connection(args.db) as conn:
         if args.fts:
@@ -183,6 +183,36 @@ def cmd_query(args: argparse.Namespace) -> None:
                                  for k, v in d["tags"].items()]
                     tags_str = f"  [{', '.join(tag_parts)}]"
                 print(f"  {d['doc_type']:20s} {d['title']}{ext}{tags_str}")
+
+            if not docs:
+                _print_zero_result_diagnostics(
+                    diagnose_zero_results(
+                        conn,
+                        fts_query=args.fts,
+                        collection_name=args.collection,
+                    )
+                )
+
+
+def _print_zero_result_diagnostics(diagnostics: dict) -> None:
+    """Render `registry.diagnose_zero_results`' output for a human at the CLI.
+
+    Proposal B item 2: a bare zero-result count is the direct trigger of the
+    grep/find fallback pattern this diagnostic exists to interrupt.
+    """
+    if "fields_searched" in diagnostics:
+        print(f"  searched fields: {', '.join(diagnostics['fields_searched'])}")
+    or_hits = diagnostics.get("or_relaxed_hits")
+    if or_hits:
+        print(f"  OR-relaxed retry of the same terms found {len(or_hits)} hit(s):")
+        for d in or_hits[:5]:
+            print(f"    {d['doc_type']:20s} {d['title']}")
+    if diagnostics.get("doc_type_counts"):
+        types = ", ".join(f"{t}={n}" for t, n in diagnostics["doc_type_counts"])
+        print(f"  doc_types in scope: {types}")
+    if diagnostics.get("nearest_tags"):
+        tags = ", ".join(f"{k}={v} ({n})" for k, v, n in diagnostics["nearest_tags"])
+        print(f"  tags actually present: {tags}")
 
 
 def cmd_context(args: argparse.Namespace) -> None:
@@ -444,7 +474,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("-t", "--type", help="Filter by doc_type")
     p_query.add_argument("-s", "--status", help="Filter by status")
     p_query.add_argument("--tag", action="append", help="Filter by tag (key=value), repeatable")
-    p_query.add_argument("--fts", help="Full-text search query")
+    p_query.add_argument(
+        "--fts",
+        help="Full-text search over title/external_id/doc_type, plus document "
+        "body content for collections that opted into content indexing "
+        "(config['fts_content_index']) — see `registry.FTS_SEARCHED_FIELDS`",
+    )
     p_query.add_argument("--json", action="store_true", help="Output as JSON")
 
     # context
