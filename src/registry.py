@@ -558,6 +558,77 @@ def sync_all(conn: sqlite3.Connection) -> list[dict]:
     return changes
 
 
+def reindex_content(
+    conn: sqlite3.Connection, collection_name: str | None = None
+) -> dict:
+    """Force-recompute `document_fts.body` for every eligible document.
+
+    `sync_document`/`sync_all` only re-index `body` as a side effect of a
+    detected `content_hash` change — a real gap found while live-testing
+    this feature against a populated database: a collection that opts into
+    `fts_content_index` (or raises/lowers `fts_content_max_bytes`) *after*
+    its documents are already registered has no other path to actually get
+    them indexed, since editing `collection.config_json` never changes any
+    document's file content or hash. This is that backfill path — it honors
+    each document's own collection's *current* config, regardless of
+    whether the file has changed since registration.
+
+    Returns `{"indexed": N, "skipped_over_gate": N, "skipped_not_opted_in":
+    N, "missing_files": [document_id, ...]}`. A document whose collection is
+    not (or no longer) opted in, or whose content now exceeds the size gate,
+    has its `body` explicitly cleared (never left stale) and is counted in
+    the corresponding `skipped_*` bucket, not `indexed`.
+    """
+    sql = (
+        "SELECT d.document_id, d.file_path, c.config_json "
+        "FROM document d JOIN collection c ON c.collection_id = d.collection_id"
+    )
+    params: list = []
+    if collection_name:
+        sql += " WHERE c.name = ?"
+        params.append(collection_name)
+    rows = conn.execute(sql, params).fetchall()
+
+    indexed = 0
+    skipped_over_gate = 0
+    skipped_not_opted_in = 0
+    missing_files: list[str] = []
+    with transaction(conn) as cur:
+        for row in rows:
+            config = json.loads(row["config_json"] or "{}")
+            if not config.get("fts_content_index"):
+                skipped_not_opted_in += 1
+                # A prior opt-in may have left real content indexed; clear
+                # it so an opt-out actually takes effect (never leave a
+                # stale body indexed against a collection's current config).
+                _set_fts_body(cur, row["document_id"], "")
+                continue
+            path = Path(row["file_path"])
+            if not path.exists():
+                missing_files.append(row["document_id"])
+                continue
+            content = path.read_text(encoding="utf-8")
+            body = _content_index_body(config, content)
+            if body is None:
+                skipped_over_gate += 1
+                _set_fts_body(cur, row["document_id"], "")
+                continue
+            _set_fts_body(cur, row["document_id"], body)
+            indexed += 1
+
+    logger.info(
+        "Reindexed content for %d document(s)%s",
+        indexed,
+        f" in collection {collection_name!r}" if collection_name else "",
+    )
+    return {
+        "indexed": indexed,
+        "skipped_over_gate": skipped_over_gate,
+        "skipped_not_opted_in": skipped_not_opted_in,
+        "missing_files": missing_files,
+    }
+
+
 # ── Context assembly ───────────────────────────────────────────
 
 

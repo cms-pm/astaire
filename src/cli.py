@@ -1,6 +1,7 @@
 """Astaire CLI — command-line interface for the memory palace.
 
-Subcommands: init, status, scan, query, lint, export, prune, sync, ingest, startup, bench.
+Subcommands: init, status, scan, query, lint, export, prune, sync, reindex-content,
+ingest, startup, bench.
 All commands use the production DB at db/memory_palace.db by default.
 """
 
@@ -307,6 +308,27 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 print(f"  [{status}] {title}  ({path})")
 
 
+def cmd_reindex_content(args: argparse.Namespace) -> None:
+    """Force-recompute document_fts.body for every eligible document.
+
+    The backfill path for a collection that opts into fts_content_index (or
+    changes fts_content_max_bytes) after its documents are already
+    registered — sync alone never reaches those documents, since a
+    config_json edit changes no file's content_hash.
+    """
+    from src.registry import reindex_content
+
+    with managed_connection(args.db) as conn:
+        result = reindex_content(conn, collection_name=args.collection)
+        print(f"Indexed {result['indexed']} document(s)")
+        if result["skipped_not_opted_in"]:
+            print(f"Skipped {result['skipped_not_opted_in']} (collection not opted in)")
+        if result["skipped_over_gate"]:
+            print(f"Skipped {result['skipped_over_gate']} (over fts_content_max_bytes)")
+        for doc_id in result["missing_files"]:
+            print(f"  MISSING file for document {doc_id}")
+
+
 def cmd_startup(args: argparse.Namespace) -> None:
     """Session startup checklist: init if needed, scan, sync, status."""
     from src.collections.discovery import register_all_collections, scan_all_collections
@@ -503,6 +525,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync = sub.add_parser("sync", help="Check for document drift")
     p_sync.add_argument("-c", "--collection", help="Sync only this collection")
 
+    # reindex-content
+    p_reindex = sub.add_parser(
+        "reindex-content",
+        help="Backfill document_fts.body for a collection that opted into fts_content_index",
+    )
+    p_reindex.add_argument(
+        "-c", "--collection", help="Reindex only this collection (default: all)"
+    )
+
     # ingest
     p_ingest = sub.add_parser("ingest", help="Ingest a source document")
     p_ingest.add_argument("file", help="Path to source file")
@@ -549,6 +580,7 @@ def main() -> None:
         "export": cmd_export,
         "prune": cmd_prune,
         "sync": cmd_sync,
+        "reindex-content": cmd_reindex_content,
         "ingest": cmd_ingest,
         "graphify-import": cmd_graphify_import,
     }

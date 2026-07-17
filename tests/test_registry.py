@@ -17,6 +17,7 @@ from src.registry import (
     query_documents,
     register_dependency,
     register_document,
+    reindex_content,
     search_documents,
     sync_collection,
     sync_document,
@@ -322,6 +323,87 @@ class TestFullTextSearch:
             )
 
         assert [h["title"] for h in search_documents(db_conn, "durable")] == ["Renamed Title"]
+
+
+class TestReindexContent:
+    """The opt-in-after-the-fact backfill path (found via live testing against
+    a real populated database — sync alone never reaches a document whose
+    collection newly opted into fts_content_index, since a config_json edit
+    changes no file's content_hash)."""
+
+    def test_reindex_backfills_documents_registered_before_opt_in(self, db_conn, sample_docs):
+        create_collection(db_conn, "late-opt-in", config={})
+        register_document(db_conn, "late-opt-in", sample_docs["doc1"], "spec", "D1")
+        assert search_documents(db_conn, "testing") == []  # not opted in yet
+
+        with transaction(db_conn) as cur:
+            cur.execute(
+                "UPDATE collection SET config_json = ? WHERE name = ?",
+                ('{"fts_content_index": true}', "late-opt-in"),
+            )
+
+        result = reindex_content(db_conn, collection_name="late-opt-in")
+        assert result["indexed"] == 1
+        assert [h["title"] for h in search_documents(db_conn, "testing")] == ["D1"]
+
+    def test_reindex_skips_and_reports_collections_not_opted_in(self, db_conn, collection, sample_docs):
+        register_document(db_conn, "test-collection", sample_docs["doc1"], "spec", "D1")
+        result = reindex_content(db_conn, collection_name="test-collection")
+        assert result == {
+            "indexed": 0, "skipped_over_gate": 0,
+            "skipped_not_opted_in": 1, "missing_files": [],
+        }
+
+    def test_reindex_clears_body_when_collection_opts_out_again(self, db_conn, sample_docs):
+        create_collection(db_conn, "toggle", config={"fts_content_index": True})
+        register_document(db_conn, "toggle", sample_docs["doc1"], "spec", "D1")
+        assert search_documents(db_conn, "testing") != []
+
+        with transaction(db_conn) as cur:
+            cur.execute(
+                "UPDATE collection SET config_json = ? WHERE name = ?",
+                ('{"fts_content_index": false}', "toggle"),
+            )
+        reindex_content(db_conn, collection_name="toggle")
+        assert search_documents(db_conn, "testing") == []
+
+    def test_reindex_respects_a_raised_size_gate(self, db_conn, tmp_path):
+        create_collection(
+            db_conn, "gate-raise",
+            config={"fts_content_index": True, "fts_content_max_bytes": 5},
+        )
+        f = tmp_path / "f.md"
+        f.write_text("this content exceeds five bytes")
+        register_document(db_conn, "gate-raise", f, "spec", "F")
+        assert search_documents(db_conn, "content") == []  # skipped at registration
+
+        with transaction(db_conn) as cur:
+            cur.execute(
+                "UPDATE collection SET config_json = ? WHERE name = ?",
+                ('{"fts_content_index": true, "fts_content_max_bytes": 1000}', "gate-raise"),
+            )
+        result = reindex_content(db_conn, collection_name="gate-raise")
+        assert result["indexed"] == 1
+        assert [h["title"] for h in search_documents(db_conn, "content")] == ["F"]
+
+    def test_reindex_reports_missing_files_without_crashing(self, db_conn, tmp_path):
+        create_collection(db_conn, "missing-file-col", config={"fts_content_index": True})
+        f = tmp_path / "will-vanish.md"
+        f.write_text("temporary")
+        doc_id = register_document(db_conn, "missing-file-col", f, "spec", "Gone Soon")
+        f.unlink()
+
+        result = reindex_content(db_conn, collection_name="missing-file-col")
+        assert result["indexed"] == 0
+        assert result["missing_files"] == [doc_id]
+
+    def test_reindex_without_collection_name_covers_every_collection(self, db_conn, sample_docs):
+        create_collection(db_conn, "col-a", config={"fts_content_index": True})
+        create_collection(db_conn, "col-b", config={"fts_content_index": True})
+        register_document(db_conn, "col-a", sample_docs["doc1"], "spec", "A")
+        register_document(db_conn, "col-b", sample_docs["doc2"], "spec", "B")
+        result = reindex_content(db_conn)
+        assert result["indexed"] == 2
 
 
 class TestZeroResultDiagnostics:

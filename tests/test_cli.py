@@ -21,6 +21,7 @@ from src.cli import (
     cmd_lint,
     cmd_prune,
     cmd_query,
+    cmd_reindex_content,
     cmd_scan,
     cmd_status,
     cmd_startup,
@@ -436,6 +437,17 @@ class TestQuery:
         out = capsys.readouterr().out
         assert "0 document(s) found" in out
 
+    def test_query_fts_no_results_shows_diagnostics(self, query_db, capsys):
+        db_path, _ = query_db
+        cmd_query(_args(
+            db=db_path, collection=None,
+            type=None, status=None, tag=None, fts="nonexistent-term-xyz", json=False,
+        ))
+        out = capsys.readouterr().out
+        assert "0 document(s) found" in out
+        assert "searched fields:" in out
+        assert "doc_types in scope:" in out
+
 
 # ── Context ──────────────────────────────────────────────────────
 
@@ -599,6 +611,42 @@ class TestSync:
         cmd_sync(_args(db=db_path, collection=None))
         out = capsys.readouterr().out
         assert "MISSING" in out
+
+
+class TestReindexContent:
+    """Backfill path for a collection that opts into fts_content_index after
+    its documents are already registered — found via live testing against a
+    real populated database."""
+
+    def test_reindex_backfills_and_reports_count(self, tmp_path, sample_project, capsys):
+        db_path = str(tmp_path / "reindex2.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+
+        conn = get_connection(db_path)
+        col_name = conn.execute("SELECT name FROM collection LIMIT 1").fetchone()["name"]
+        conn.execute(
+            "UPDATE collection SET config_json = json_set(config_json, '$.fts_content_index', json('true')) "
+            "WHERE name = ?",
+            (col_name,),
+        )
+        conn.commit()
+        conn.close()
+
+        cmd_reindex_content(_args(db=db_path, collection=col_name))
+        out = capsys.readouterr().out
+        assert "Indexed" in out
+        assert "document(s)" in out
+
+    def test_reindex_reports_zero_when_no_collection_opted_in(self, tmp_path, sample_project, capsys):
+        db_path = str(tmp_path / "reindex3.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+
+        cmd_reindex_content(_args(db=db_path, collection=None))
+        out = capsys.readouterr().out
+        assert "Indexed 0 document(s)" in out
+        assert "not opted in" in out
 
 
 # ── Ingest ───────────────────────────────────────────────────────
