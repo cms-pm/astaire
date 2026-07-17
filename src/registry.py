@@ -417,9 +417,18 @@ def _or_relax(safe_query: str) -> str:
     tokens. Joining with `OR` is strictly broader — used only for the
     zero-result diagnostic retry, never as the primary search semantics
     (an OR-widened *primary* result set would be a silent behavior change).
+
+    Each token is wrapped in double quotes so FTS5 treats it as a literal
+    phrase, never a bareword operator keyword. `_sanitize_fts_query` strips
+    punctuation but deliberately does not touch bareword tokens that happen
+    to spell `AND`/`OR`/`NOT`/`NEAR` — an unquoted `"governance AND
+    rollout"` relaxed to `governance OR AND OR rollout` is not valid FTS5
+    syntax (`AND` parses as an operator, not a search term) and raised
+    `sqlite3.OperationalError` here, in the diagnostic path built
+    specifically to keep a zero-result query from being a dead end.
     """
     parts = safe_query.split()
-    return " OR ".join(parts) if parts else safe_query
+    return " OR ".join(f'"{part}"' for part in parts) if parts else safe_query
 
 
 def diagnose_zero_results(
@@ -451,14 +460,22 @@ def diagnose_zero_results(
     if fts_query is not None:
         diagnostics["fields_searched"] = FTS_SEARCHED_FIELDS
         relaxed = _or_relax(_sanitize_fts_query(fts_query))
-        rows = conn.execute(
-            """SELECT d.* FROM document d
-               JOIN document_fts ON document_fts.rowid = d.rowid
-               WHERE document_fts MATCH ?
-               ORDER BY rank LIMIT ?""",
-            (relaxed, limit),
-        ).fetchall()
-        diagnostics["or_relaxed_hits"] = [_enrich_document(conn, dict(r)) for r in rows]
+        try:
+            rows = conn.execute(
+                """SELECT d.* FROM document d
+                   JOIN document_fts ON document_fts.rowid = d.rowid
+                   WHERE document_fts MATCH ?
+                   ORDER BY rank LIMIT ?""",
+                (relaxed, limit),
+            ).fetchall()
+            diagnostics["or_relaxed_hits"] = [_enrich_document(conn, dict(r)) for r in rows]
+        except sqlite3.OperationalError as exc:
+            # Best-effort diagnostic: a zero-result report must never itself
+            # crash. Quoting each token in _or_relax already prevents the
+            # known cause (bareword AND/OR/NOT), but this stays fail-soft
+            # against any FTS5 syntax edge case neither of us has thought of.
+            logger.warning("OR-relaxed retry for %r failed: %s", fts_query, exc)
+            diagnostics["or_relaxed_hits"] = []
 
     tag_sql = "SELECT t.tag_key, t.tag_value, COUNT(*) AS n FROM document_tag t"
     type_sql = "SELECT d.doc_type, COUNT(*) AS n FROM document d"
@@ -535,6 +552,11 @@ def sync_document(
                     "UPDATE document SET status = 'archived', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE document_id = ?",
                     (document_id,),
                 )
+                # The file is gone; any previously-indexed content is now
+                # unverifiable and must not stay searchable indefinitely on
+                # an archived row (search_documents does not filter by
+                # status) — clear it in the same transaction as the archive.
+                _set_fts_body(cur, document_id, "")
             logger.warning("Document file missing, archived: %s", path)
         return {**base, "changed": True, "old_hash": old_hash, "new_hash": None, "missing": True}
 
@@ -611,10 +633,24 @@ def reindex_content(
     whether the file has changed since registration.
 
     Returns `{"indexed": N, "skipped_over_gate": N, "skipped_not_opted_in":
-    N, "missing_files": [document_id, ...]}`. A document whose collection is
-    not (or no longer) opted in, or whose content now exceeds the size gate,
-    has its `body` explicitly cleared (never left stale) and is counted in
-    the corresponding `skipped_*` bucket, not `indexed`.
+    N, "missing_files": [document_id, ...], "read_errors": [document_id,
+    ...]}`. A document whose collection is not (or no longer) opted in,
+    whose content now exceeds the size gate, whose file is missing, or
+    whose file could not be read has its `body` explicitly cleared (never
+    left stale) — except a read error, where the prior `body` is left
+    untouched, since a transient read failure is not evidence the content
+    is actually gone (unlike a missing file or an explicit opt-out/gate
+    change).
+
+    Each document is read from disk and written in its own short
+    transaction — file I/O never happens while a write transaction is
+    open (this repo's own rule: "do not hold transactions open while
+    reading files from disk"; an earlier version of this function violated
+    it by wrapping the entire loop, including every `path.read_text()`
+    call, in one transaction — a real write-lock-duration and
+    single-bad-file-rolls-back-everything problem on a deployment with
+    hundreds of documents). A file that fails to decode no longer aborts
+    the whole batch; it is recorded in `read_errors` and skipped.
     """
     sql = (
         "SELECT d.document_id, d.file_path, c.config_json "
@@ -630,28 +666,47 @@ def reindex_content(
     skipped_over_gate = 0
     skipped_not_opted_in = 0
     missing_files: list[str] = []
-    with transaction(conn) as cur:
-        for row in rows:
-            config = json.loads(row["config_json"] or "{}")
-            if not config.get("fts_content_index"):
-                skipped_not_opted_in += 1
-                # A prior opt-in may have left real content indexed; clear
-                # it so an opt-out actually takes effect (never leave a
-                # stale body indexed against a collection's current config).
+    read_errors: list[str] = []
+
+    for row in rows:
+        config = json.loads(row["config_json"] or "{}")
+        if not config.get("fts_content_index"):
+            skipped_not_opted_in += 1
+            # A prior opt-in may have left real content indexed; clear it
+            # so an opt-out actually takes effect (never leave a stale
+            # body indexed against a collection's current config).
+            with transaction(conn) as cur:
                 _set_fts_body(cur, row["document_id"], "")
-                continue
-            path = Path(row["file_path"])
-            if not path.exists():
-                missing_files.append(row["document_id"])
-                continue
+            continue
+
+        path = Path(row["file_path"])
+        if not path.exists():
+            missing_files.append(row["document_id"])
+            # The file is gone; any previously-indexed content is no
+            # longer verifiable and must not stay searchable indefinitely.
+            with transaction(conn) as cur:
+                _set_fts_body(cur, row["document_id"], "")
+            continue
+
+        try:
             content = path.read_text(encoding="utf-8")
-            body = _content_index_body(config, content)
+        except (OSError, UnicodeDecodeError) as exc:
+            read_errors.append(row["document_id"])
+            logger.warning(
+                "Reindex: could not read %s for document %s (%s); leaving its "
+                "existing indexed content untouched",
+                path, row["document_id"], exc,
+            )
+            continue
+
+        body = _content_index_body(config, content)
+        with transaction(conn) as cur:
             if body is None:
                 skipped_over_gate += 1
                 _set_fts_body(cur, row["document_id"], "")
-                continue
-            _set_fts_body(cur, row["document_id"], body)
-            indexed += 1
+            else:
+                _set_fts_body(cur, row["document_id"], body)
+                indexed += 1
 
     logger.info(
         "Reindexed content for %d document(s)%s",
@@ -663,6 +718,7 @@ def reindex_content(
         "skipped_over_gate": skipped_over_gate,
         "skipped_not_opted_in": skipped_not_opted_in,
         "missing_files": missing_files,
+        "read_errors": read_errors,
     }
 
 

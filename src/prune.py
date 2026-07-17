@@ -14,6 +14,40 @@ from src.utils import ulid
 
 logger = logging.getLogger(__name__)
 
+#: Default retention window, in days, for logged `operation='query'`
+#: ingest_log rows (Proposal B item 5's own follow-up: query logging fires
+#: on every read-only `astaire query` call — unlike every other ingest_log
+#: writer, which logs a real state change — so without a retention policy
+#: the table grows unboundedly and old query noise never ages out. Only
+#: `'query'` rows are ever touched by this; register/ingest/lint/etc. stay
+#: forever, matching this module's existing conservative deletion model.
+DEFAULT_QUERY_LOG_RETENTION_DAYS = 30
+
+
+def prune_query_log(
+    conn: sqlite3.Connection,
+    retention_days: int = DEFAULT_QUERY_LOG_RETENTION_DAYS,
+) -> int:
+    """Delete `ingest_log` rows for `operation='query'` older than `retention_days`.
+
+    Returns the number of rows deleted. A conservative age-based delete —
+    same spirit as `prune_expired_claims`'s explicit-`expires_at` model,
+    just applied to the one ingest_log operation type that is logged on
+    every read rather than on a meaningful write.
+    """
+    with transaction(conn) as cur:
+        deleted = cur.execute(
+            "DELETE FROM ingest_log WHERE operation = 'query' "
+            "AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+            (f"-{int(retention_days)} days",),
+        ).rowcount
+    if deleted:
+        logger.info(
+            "Pruned %d stale query log entr%s (older than %d day(s))",
+            deleted, "y" if deleted == 1 else "ies", retention_days,
+        )
+    return deleted
+
 
 def prune_expired_claims(
     conn: sqlite3.Connection,

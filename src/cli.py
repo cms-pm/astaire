@@ -327,15 +327,19 @@ def cmd_export(args: argparse.Namespace) -> None:
 
 
 def cmd_prune(args: argparse.Namespace) -> None:
-    """Prune expired claims."""
-    from src.prune import prune_expired_claims
+    """Prune expired claims and stale query-log entries."""
+    from src.prune import prune_expired_claims, prune_query_log
 
     with managed_connection(args.db) as conn:
         stats = prune_expired_claims(conn)
-        if stats["claims_pruned"] == 0:
+        query_log_pruned = prune_query_log(conn)
+        if stats["claims_pruned"] == 0 and query_log_pruned == 0:
             print("Nothing to prune.")
         else:
-            print(f"Pruned {stats['claims_pruned']} claim(s), cleaned {stats['clusters_cleaned']} cluster assignment(s)")
+            if stats["claims_pruned"]:
+                print(f"Pruned {stats['claims_pruned']} claim(s), cleaned {stats['clusters_cleaned']} cluster assignment(s)")
+            if query_log_pruned:
+                print(f"Pruned {query_log_pruned} stale query log entr{'y' if query_log_pruned == 1 else 'ies'}")
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
@@ -383,6 +387,8 @@ def cmd_reindex_content(args: argparse.Namespace) -> None:
             print(f"Skipped {result['skipped_over_gate']} (over fts_content_max_bytes)")
         for doc_id in result["missing_files"]:
             print(f"  MISSING file for document {doc_id}")
+        for doc_id in result["read_errors"]:
+            print(f"  READ ERROR for document {doc_id} (existing indexed content left untouched)")
 
 
 def cmd_startup(args: argparse.Namespace) -> None:

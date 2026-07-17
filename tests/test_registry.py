@@ -423,7 +423,7 @@ class TestReindexContent:
         result = reindex_content(db_conn, collection_name="test-collection")
         assert result == {
             "indexed": 0, "skipped_over_gate": 0,
-            "skipped_not_opted_in": 1, "missing_files": [],
+            "skipped_not_opted_in": 1, "missing_files": [], "read_errors": [],
         }
 
     def test_reindex_clears_body_when_collection_opts_out_again(self, db_conn, sample_docs):
@@ -463,11 +463,53 @@ class TestReindexContent:
         f = tmp_path / "will-vanish.md"
         f.write_text("temporary")
         doc_id = register_document(db_conn, "missing-file-col", f, "spec", "Gone Soon")
+        assert search_documents(db_conn, "temporary") != []  # indexed at registration
         f.unlink()
 
         result = reindex_content(db_conn, collection_name="missing-file-col")
         assert result["indexed"] == 0
         assert result["missing_files"] == [doc_id]
+        # regression guard: a missing file's previously-indexed content must
+        # not stay searchable indefinitely (it was silently left stale in an
+        # earlier version of this function).
+        assert search_documents(db_conn, "temporary") == []
+
+    def test_sync_document_clears_body_when_file_goes_missing(self, db_conn, tmp_path):
+        create_collection(db_conn, "sync-missing-col", config={"fts_content_index": True})
+        f = tmp_path / "will-vanish.md"
+        f.write_text("temporary content")
+        doc_id = register_document(db_conn, "sync-missing-col", f, "spec", "Gone Soon")
+        assert search_documents(db_conn, "temporary") != []
+        f.unlink()
+
+        result = sync_document(db_conn, doc_id)
+        assert result["missing"] is True
+        assert search_documents(db_conn, "temporary") == []
+
+    def test_reindex_read_error_on_one_document_does_not_abort_the_batch(self, db_conn, tmp_path):
+        create_collection(db_conn, "read-error-col", config={"fts_content_index": True})
+        good = tmp_path / "good.md"
+        good.write_text("perfectly readable content")
+        bad = tmp_path / "bad.md"
+        bad.write_text("placeholder")
+        good_id = register_document(db_conn, "read-error-col", good, "spec", "Good")
+        bad_id = register_document(db_conn, "read-error-col", bad, "spec", "Bad")
+
+        # Corrupt `bad` into invalid UTF-8 *after* registration (registration
+        # already read it fine), so reindex hits a genuine decode failure.
+        bad.write_bytes(b"\xff\xfe\x00broken")
+        good.write_text("perfectly readable content, updated")
+
+        result = reindex_content(db_conn, collection_name="read-error-col")
+        assert result["read_errors"] == [bad_id]
+        # the good document in the same batch must still be indexed — a
+        # single bad file must not roll back the whole reindex (an earlier
+        # version held one write transaction open across the entire loop).
+        assert result["indexed"] == 1
+        assert [h["title"] for h in search_documents(db_conn, "updated")] == ["Good"]
+        # the bad document's prior (registration-time) body is left as-is,
+        # not silently cleared on an unverified read failure.
+        assert [h["title"] for h in search_documents(db_conn, "placeholder")] == ["Bad"]
 
     def test_reindex_without_collection_name_covers_every_collection(self, db_conn, sample_docs):
         create_collection(db_conn, "col-a", config={"fts_content_index": True})

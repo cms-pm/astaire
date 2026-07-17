@@ -641,6 +641,28 @@ class TestPrune:
         assert count == 0
         conn.close()
 
+    def test_prune_removes_stale_query_log(self, tmp_db, capsys):
+        conn = get_connection(tmp_db)
+        log_id = ulid.generate()
+        with transaction(conn) as cur:
+            cur.execute(
+                "INSERT INTO ingest_log (log_id, operation, summary, created_at) "
+                "VALUES (?, 'query', ?, ?)",
+                (log_id, "test query", "2000-01-01T00:00:00Z"),
+            )
+        conn.close()
+
+        cmd_prune(_args(db=tmp_db))
+        out = capsys.readouterr().out
+        assert "Pruned 1 stale query log entry" in out
+
+        conn = get_connection(tmp_db)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ingest_log WHERE log_id = ?", (log_id,)
+        ).fetchone()[0]
+        assert count == 0
+        conn.close()
+
 
 # ── Sync ─────────────────────────────────────────────────────────
 
