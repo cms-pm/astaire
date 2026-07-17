@@ -13,7 +13,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 
-from src.db import transaction
+from src.db import claims_module_present, transaction
 from src.utils import hashing, tokens, ulid
 
 logger = logging.getLogger(__name__)
@@ -32,32 +32,46 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Module split (Proposal A): the claim/entity/relationship/contradiction
+    # subsystem is optional. When it isn't installed, the sections and
+    # metrics below that depend on it are omitted entirely (not shown as
+    # zero) — a "0" would misleadingly read as "empty knowledge base"
+    # rather than "this feature isn't turned on". claims_module_present()
+    # is checked once up front so no claim-side table is ever queried
+    # against a core-only database.
+    claims_installed = claims_module_present(conn)
+
     # Key metrics
     source_count = conn.execute("SELECT COUNT(*) FROM source").fetchone()[0]
-    entity_count = conn.execute("SELECT COUNT(*) FROM entity").fetchone()[0]
-    claim_count = conn.execute(
-        "SELECT COUNT(*) FROM claim WHERE superseded_by IS NULL AND epistemic_tag != 'retracted'"
-    ).fetchone()[0]
-    rel_count = conn.execute("SELECT COUNT(*) FROM relationship").fetchone()[0]
-    contradiction_count = conn.execute(
-        "SELECT COUNT(*) FROM contradiction WHERE resolution_status = 'open'"
-    ).fetchone()[0]
     collection_count = conn.execute("SELECT COUNT(*) FROM collection").fetchone()[0]
     document_count = conn.execute(
         "SELECT COUNT(*) FROM document WHERE status NOT IN ('superseded', 'archived')"
     ).fetchone()[0]
 
-    # Entity registry (top 30 by hub score)
-    entity_lines = []
-    hub_rows = conn.execute(
-        "SELECT canonical_name, entity_type, claim_count, hub_score FROM v_entity_hub_scores LIMIT 30"
-    ).fetchall()
-    for row in hub_rows:
-        entity_lines.append(
-            f"- **{row['canonical_name']}** ({row['entity_type']}): "
-            f"{row['claim_count']} claims, hub score {row['hub_score']}"
-        )
-    entity_section = "\n".join(entity_lines) if entity_lines else "- (none)"
+    entity_count = claim_count = rel_count = contradiction_count = 0
+    entity_section = topic_section = contra_section = None
+
+    if claims_installed:
+        entity_count = conn.execute("SELECT COUNT(*) FROM entity").fetchone()[0]
+        claim_count = conn.execute(
+            "SELECT COUNT(*) FROM claim WHERE superseded_by IS NULL AND epistemic_tag != 'retracted'"
+        ).fetchone()[0]
+        rel_count = conn.execute("SELECT COUNT(*) FROM relationship").fetchone()[0]
+        contradiction_count = conn.execute(
+            "SELECT COUNT(*) FROM contradiction WHERE resolution_status = 'open'"
+        ).fetchone()[0]
+
+        # Entity registry (top 30 by hub score)
+        entity_lines = []
+        hub_rows = conn.execute(
+            "SELECT canonical_name, entity_type, claim_count, hub_score FROM v_entity_hub_scores LIMIT 30"
+        ).fetchall()
+        for row in hub_rows:
+            entity_lines.append(
+                f"- **{row['canonical_name']}** ({row['entity_type']}): "
+                f"{row['claim_count']} claims, hub score {row['hub_score']}"
+            )
+        entity_section = "\n".join(entity_lines) if entity_lines else "- (none)"
 
     # Document registry stats per collection
     doc_lines = []
@@ -79,20 +93,21 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
         )
     doc_section = "\n".join(doc_lines) if doc_lines else "- (none)"
 
-    # Hot topics (top 5 clusters by recent activity)
-    topic_lines = []
-    cluster_rows = conn.execute(
-        """SELECT label, summary, claim_count, updated_at
-           FROM topic_cluster
-           ORDER BY updated_at DESC, claim_count DESC
-           LIMIT 5"""
-    ).fetchall()
-    for row in cluster_rows:
-        summary = row["summary"] or "no summary"
-        topic_lines.append(
-            f"- **{row['label']}**: {summary} — {row['claim_count']} claims, last updated {row['updated_at']}"
-        )
-    topic_section = "\n".join(topic_lines) if topic_lines else "- (none)"
+    if claims_installed:
+        # Hot topics (top 5 clusters by recent activity)
+        topic_lines = []
+        cluster_rows = conn.execute(
+            """SELECT label, summary, claim_count, updated_at
+               FROM topic_cluster
+               ORDER BY updated_at DESC, claim_count DESC
+               LIMIT 5"""
+        ).fetchall()
+        for row in cluster_rows:
+            summary = row["summary"] or "no summary"
+            topic_lines.append(
+                f"- **{row['label']}**: {summary} — {row['claim_count']} claims, last updated {row['updated_at']}"
+            )
+        topic_section = "\n".join(topic_lines) if topic_lines else "- (none)"
 
     # Routing hints (from graphify-outputs and any other collection with routing_hint tags)
     routing_rows = conn.execute(
@@ -109,17 +124,18 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
         else ""
     )
 
-    # Open contradictions
-    contra_lines = []
-    contra_rows = conn.execute(
-        """SELECT entity_a_name, entity_b_name, description
-           FROM v_open_contradictions
-           LIMIT 10"""
-    ).fetchall()
-    for row in contra_rows:
-        desc = row["description"] or "no description"
-        contra_lines.append(f"- {row['entity_a_name']} vs {row['entity_b_name']}: {desc}")
-    contra_section = "\n".join(contra_lines) if contra_lines else "- (none)"
+    if claims_installed:
+        # Open contradictions
+        contra_lines = []
+        contra_rows = conn.execute(
+            """SELECT entity_a_name, entity_b_name, description
+               FROM v_open_contradictions
+               LIMIT 10"""
+        ).fetchall()
+        for row in contra_rows:
+            desc = row["description"] or "no description"
+            contra_lines.append(f"- {row['entity_a_name']} vs {row['entity_b_name']}: {desc}")
+        contra_section = "\n".join(contra_lines) if contra_lines else "- (none)"
 
     # Recent activity (last 5 ingest_log entries). 'query' is excluded
     # alongside the pre-existing 'recompile' exclusion: query-operation
@@ -149,31 +165,43 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
 
     routing_block = f"\n## Routing hints\n{routing_section}\n" if routing_section else ""
 
+    # Claims-module-dependent sections/metric lines are omitted entirely
+    # (not zeroed) when the module isn't installed — see the note above
+    # claims_installed for rationale.
+    entity_block = (
+        f"\n## Entity registry ({entity_count} entities)\n{entity_section}\n"
+        if claims_installed
+        else ""
+    )
+    topics_block = (
+        f"\n## Hot topics\n{topic_section}\n" if claims_installed else ""
+    )
+    contradictions_block = (
+        f"\n## Open contradictions ({contradiction_count})\n{contra_section}\n"
+        if claims_installed
+        else ""
+    )
+    claims_metrics_block = (
+        f"- Total active claims: {claim_count}\n"
+        f"- Total entities: {entity_count}\n"
+        f"- Total relationships: {rel_count}\n"
+        f"- Open contradictions: {contradiction_count}\n"
+        if claims_installed
+        else ""
+    )
+
     content = f"""# Knowledge base state — {now}
-
-## Entity registry ({entity_count} entities)
-{entity_section}
-
+{entity_block}
 ## Document registry ({document_count} documents across {collection_count} collections)
 {doc_section}
-{routing_block}
-## Hot topics
-{topic_section}
-
-## Open contradictions ({contradiction_count})
-{contra_section}
-
+{routing_block}{topics_block}{contradictions_block}
 ## Recent activity
 {activity_section}
 
 ## Key metrics
 - Total sources: {source_count}
-- Total active claims: {claim_count}
-- Total entities: {entity_count}
-- Total relationships: {rel_count}
-- Total documents: {document_count}
+{claims_metrics_block}- Total documents: {document_count}
 - Total collections: {collection_count}
-- Open contradictions: {contradiction_count}
 - Last ingest: {last_ingest['created_at'] if last_ingest else 'never'}
 - Last lint: {last_lint['created_at'] if last_lint else 'never'}
 """

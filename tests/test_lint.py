@@ -4,6 +4,7 @@ import pytest
 
 from src.db import get_connection, init_db, transaction
 from src.lint import (
+    check_claims_module_status,
     check_document_drift,
     check_hub_score_anomalies,
     check_l0_performance,
@@ -455,3 +456,63 @@ class TestRunAllChecks:
         # L0 should have been fixed
         l0_issues = results["l0_staleness"]
         assert any(i.get("fixed") for i in l0_issues)
+
+
+# ── Proposal A: claims-module-dependent checks on a core-only DB ──
+
+class TestGuardedChecksOnCoreOnlyDb:
+    """The six claim-side lint checks must return [] cleanly (not raise
+    sqlite3.OperationalError) when the optional claims module isn't
+    installed."""
+
+    def test_check_orphan_entities_returns_empty(self, db_conn_core_only):
+        assert check_orphan_entities(db_conn_core_only) == []
+
+    def test_check_orphan_claims_returns_empty(self, db_conn_core_only):
+        assert check_orphan_claims(db_conn_core_only) == []
+
+    def test_check_open_contradictions_returns_empty(self, db_conn_core_only):
+        assert check_open_contradictions(db_conn_core_only) == []
+
+    def test_check_stale_claims_returns_empty(self, db_conn_core_only):
+        assert check_stale_claims(db_conn_core_only) == []
+
+    def test_check_hub_score_anomalies_returns_empty(self, db_conn_core_only):
+        assert check_hub_score_anomalies(db_conn_core_only) == []
+
+    def test_check_unbounded_clusters_returns_empty(self, db_conn_core_only):
+        assert check_unbounded_clusters(db_conn_core_only) == []
+
+    def test_run_all_checks_does_not_crash_on_core_only_db(self, db_conn_core_only):
+        generate_l0(db_conn_core_only)
+        results = run_all_checks(db_conn_core_only)
+        assert results["orphan_entities"] == []
+        assert results["orphan_claims"] == []
+        assert results["open_contradictions"] == []
+        assert results["stale_claims"] == []
+        assert results["hub_score_anomalies"] == []
+        assert results["unbounded_clusters"] == []
+        assert results["claims_module_status"] == {"installed": False}
+
+
+# ── check_claims_module_status ──────────────────────────────────
+
+class TestCheckClaimsModuleStatus:
+    def test_not_installed_on_core_only_db(self, db_conn_core_only):
+        assert check_claims_module_status(db_conn_core_only) == {"installed": False}
+
+    def test_installed_with_no_data_reports_zero_row_count(self, db_conn):
+        status = check_claims_module_status(db_conn)
+        assert status["installed"] is True
+        assert status["row_count"] == 0
+        assert status["last_write"] is None
+
+    def test_installed_with_data_reports_row_count_and_last_write(self, db_conn):
+        src_id = _create_source(db_conn)
+        eid = _create_entity(db_conn, "Tracked Entity")
+        _create_claim(db_conn, eid, src_id)
+
+        status = check_claims_module_status(db_conn)
+        assert status["installed"] is True
+        assert status["row_count"] >= 2  # entity + claim
+        assert status["last_write"] is not None

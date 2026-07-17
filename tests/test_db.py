@@ -3,8 +3,10 @@
 import sqlite3
 
 from src.db import (
+    claims_module_present,
     get_connection,
     init_db,
+    install_claims_module,
     migrate_document_fts_body_column,
     migrate_source_type_taxonomy,
     transaction,
@@ -307,6 +309,96 @@ class TestDocumentFtsBodyColumnMigration:
         )
         conn.commit()
         assert [h["title"] for h in search_documents(conn, "backfilled")] == ["Legacy Doc"]
+        conn.close()
+
+
+class TestClaimsModule:
+    """Proposal A — the claim/entity/relationship/contradiction subsystem is
+    an optional module, installed only by explicit opt-in."""
+
+    _CLAIMS_TABLES = {
+        "entity", "claim", "relationship", "topic_cluster",
+        "claim_cluster", "contradiction",
+    }
+
+    def test_core_only_db_has_no_claims_tables(self, db_conn_core_only):
+        tables = {
+            r["name"] for r in db_conn_core_only.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert self._CLAIMS_TABLES.isdisjoint(tables)
+        assert "document" in tables
+        assert "source" in tables
+
+    def test_claims_module_present_false_on_core_only_db(self, db_conn_core_only):
+        assert claims_module_present(db_conn_core_only) is False
+
+    def test_claims_module_present_true_after_install(self, db_conn_core_only):
+        install_claims_module(db_conn_core_only)
+        assert claims_module_present(db_conn_core_only) is True
+
+    def test_claims_module_present_true_with_init_db_with_claims(self, db_conn):
+        # db_conn fixture calls init_db(conn, with_claims=True)
+        assert claims_module_present(db_conn) is True
+
+    def test_install_claims_module_creates_tables(self, db_conn_core_only):
+        install_claims_module(db_conn_core_only)
+        tables = {
+            r["name"] for r in db_conn_core_only.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert self._CLAIMS_TABLES.issubset(tables)
+
+    def test_install_claims_module_is_idempotent(self, db_conn_core_only):
+        from src.utils.ulid import generate
+
+        install_claims_module(db_conn_core_only)
+        with transaction(db_conn_core_only) as cur:
+            cur.execute(
+                "INSERT INTO entity (entity_id, canonical_name, entity_type) "
+                "VALUES (?, 'Widget', 'concept')",
+                (generate(),),
+            )
+        # Re-running must not raise and must not touch existing rows.
+        install_claims_module(db_conn_core_only)
+        row = db_conn_core_only.execute(
+            "SELECT COUNT(*) AS n FROM entity"
+        ).fetchone()
+        assert row["n"] == 1
+
+    def test_init_db_with_claims_true_installs_module(self, db_conn_core_only):
+        assert claims_module_present(db_conn_core_only) is False
+        init_db(db_conn_core_only, with_claims=True)
+        assert claims_module_present(db_conn_core_only) is True
+
+    def test_backward_compat_existing_claims_data_untouched_by_core_reinit(self):
+        """Regression: an old-style DB (core + claims schema applied together,
+        the pre-Proposal-A shape) must keep working unchanged when the new
+        core-only init_db() is re-run against it."""
+        from src.utils.ulid import generate
+
+        conn = get_connection(":memory:")
+        init_db(conn, with_claims=True)
+
+        entity_id = generate()
+        with transaction(conn) as cur:
+            cur.execute(
+                "INSERT INTO entity (entity_id, canonical_name, entity_type) "
+                "VALUES (?, 'Old Entity', 'concept')",
+                (entity_id,),
+            )
+
+        # Re-running the (now core-only-by-default) init_db() must not drop
+        # or otherwise disturb the pre-existing claims-module data.
+        init_db(conn)
+
+        assert claims_module_present(conn) is True
+        row = conn.execute(
+            "SELECT canonical_name FROM entity WHERE entity_id = ?", (entity_id,)
+        ).fetchone()
+        assert row["canonical_name"] == "Old Entity"
         conn.close()
 
 

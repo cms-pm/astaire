@@ -38,10 +38,13 @@ from src.utils import ulid
 
 @pytest.fixture
 def tmp_db(tmp_path):
-    """Create a temporary database file with schema initialized."""
+    """Create a temporary database file with core registry + claims module
+    initialized (with_claims=True) — most existing CLI tests predate the
+    Proposal A module split and exercise features (export, prune, ingest,
+    graphify import) that assume claim-side tables are present."""
     db_path = str(tmp_path / "test.db")
     conn = get_connection(db_path)
-    init_db(conn)
+    init_db(conn, with_claims=True)
     conn.close()
     return db_path
 
@@ -121,7 +124,13 @@ def sample_project(tmp_path):
 
 def _args(**kwargs):
     """Build a Namespace with defaults."""
-    defaults = {"db": None, "verbose": False, "no_sync": False, "tag_prefix": None}
+    defaults = {
+        "db": None,
+        "verbose": False,
+        "no_sync": False,
+        "tag_prefix": None,
+        "with_claims": False,
+    }
     defaults.update(kwargs)
     return Namespace(**defaults)
 
@@ -133,22 +142,43 @@ class TestInit:
     """SCN-6.1-01, SCN-6.1-02"""
 
     def test_init_creates_schema(self, tmp_path):
+        """Proposal A: a bare `init` creates only the core registry — the
+        claims module (entity/claim) is opt-in only."""
         db_path = str(tmp_path / "new.db")
         cmd_init(_args(db=db_path))
         conn = get_connection(db_path)
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()]
-        assert "entity" in tables
-        assert "claim" in tables
+        assert "entity" not in tables
+        assert "claim" not in tables
         assert "document" in tables
         assert "collection" in tables
+        conn.close()
+
+    def test_init_with_claims_creates_claims_module(self, tmp_path):
+        db_path = str(tmp_path / "new_claims.db")
+        cmd_init(_args(db=db_path, with_claims=True))
+        conn = get_connection(db_path)
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        assert "entity" in tables
+        assert "claim" in tables
+        assert "relationship" in tables
+        assert "contradiction" in tables
+        assert "document" in tables
         conn.close()
 
     def test_init_idempotent(self, tmp_path):
         db_path = str(tmp_path / "idem.db")
         cmd_init(_args(db=db_path))
         cmd_init(_args(db=db_path))  # no error
+
+    def test_init_with_claims_idempotent(self, tmp_path):
+        db_path = str(tmp_path / "idem_claims.db")
+        cmd_init(_args(db=db_path, with_claims=True))
+        cmd_init(_args(db=db_path, with_claims=True))  # no error
 
 
 # ── Startup ──────────────────────────────────────────────────────
@@ -276,6 +306,42 @@ class TestDoctor:
         out = capsys.readouterr().out
         assert "[WARN] Tokenizer encoding 'cl100k_base' is unavailable." in out
         assert "Approximate token fallback is enabled" in out
+
+    def test_doctor_does_not_require_claim_tables(self, tmp_path, monkeypatch, capsys):
+        """Proposal A: doctor's required_tables no longer includes the
+        claims module — a core-only DB must report healthy, not [FAIL]."""
+        db_path = str(tmp_path / "core_only.db")
+        conn = get_connection(db_path)
+        init_db(conn)
+        conn.close()
+        monkeypatch.setattr(
+            "src.utils.tokens.check_tokenizer_health",
+            lambda encoding="cl100k_base": {
+                "ok": True,
+                "encoding": encoding,
+                "message": f"Tokenizer encoding '{encoding}' is ready.",
+                "approx_tokens_enabled": True,
+            },
+        )
+        cmd_doctor(_args(db=db_path))
+        out = capsys.readouterr().out
+        assert "[PASS] Database schema initialized" in out
+        assert "[FAIL]" not in out
+        assert "[INFO] Claims module: not installed" in out
+
+    def test_doctor_reports_claims_module_installed(self, tmp_db, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "src.utils.tokens.check_tokenizer_health",
+            lambda encoding="cl100k_base": {
+                "ok": True,
+                "encoding": encoding,
+                "message": f"Tokenizer encoding '{encoding}' is ready.",
+                "approx_tokens_enabled": True,
+            },
+        )
+        cmd_doctor(_args(db=tmp_db))
+        out = capsys.readouterr().out
+        assert "[INFO] Claims module: installed" in out
 
 
 # ── Scan ─────────────────────────────────────────────────────────
@@ -578,6 +644,10 @@ class TestExport:
 
     def test_export_generates_wiki(self, tmp_path, sample_project, capsys):
         db_path = str(tmp_path / "export.db")
+        # Export renders entity hub scores / contradictions, which requires
+        # the optional claims module (Proposal A) — install it explicitly
+        # before startup's core-only init_db() runs (idempotent, additive).
+        cmd_init(_args(db=db_path, with_claims=True))
         cmd_startup(_args(db=db_path, root=str(sample_project)))
         capsys.readouterr()
 
@@ -842,7 +912,9 @@ class TestGraphifyImport:
         project = tmp_path / "project"
         graph_dir = project / "graphify-out"
         graph_dir.mkdir(parents=True)
-        cmd_init(_args(db=db_path))
+        # Graphify import writes entities/relationships/claims, which
+        # requires the optional claims module (Proposal A).
+        cmd_init(_args(db=db_path, with_claims=True))
         (project / "governance.yaml").write_text(
             "profile: strict-baseline\n"
             "graphify:\n"
@@ -885,7 +957,7 @@ class TestGraphifyImport:
         contracts_dir = project / "docs" / "governance"
         graph_dir.mkdir(parents=True)
         contracts_dir.mkdir(parents=True)
-        cmd_init(_args(db=db_path))
+        cmd_init(_args(db=db_path, with_claims=True))
         registry = contracts_dir / "contracts.json"
         registry.write_text(json.dumps([{"id": "contract", "approval_status": "approved"}]))
         (project / "governance.yaml").write_text(
@@ -1043,7 +1115,7 @@ class TestConnectionCleanup:
         tables = [r[0] for r in conn2.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()]
-        assert "entity" in tables
+        assert "document" in tables
         conn2.close()
 
 
