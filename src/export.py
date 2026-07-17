@@ -11,7 +11,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from src.db import transaction
+from src.db import claims_module_present, transaction
 from src.utils import ulid
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,21 @@ def export_wiki(
     """SCN-5.2-06: Full rebuild — delete and recreate the wiki directory.
 
     Returns dict with page counts: entities, collections, total_pages.
+
+    Raises RuntimeError if the optional claims module (Proposal A) is not
+    installed on this database — checked before any filesystem mutation
+    (including the directory `rmtree`) so a call against a core-only
+    database never destroys an existing wiki export before failing.
     """
+    if not claims_module_present(conn):
+        raise RuntimeError(
+            "Claims module not installed on this database. "
+            "export_wiki() generates entity pages and contradiction/"
+            "timeline views from claim-store data, which requires the "
+            "optional claims module. Run 'astaire init --with-claims' to "
+            "enable it. No files were modified."
+        )
+
     out = Path(output_dir)
 
     # Clean slate

@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).resolve().parent.parent / "db" / "memory_palace.db"
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "schema" / "memory_palace_schema.sql"
+CLAIMS_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "schema" / "claims_module_schema.sql"
 
 
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
@@ -26,14 +27,59 @@ def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(conn: sqlite3.Connection, schema_path: str | Path | None = None) -> None:
-    """Initialize the database schema. Idempotent — uses IF NOT EXISTS throughout."""
+def init_db(
+    conn: sqlite3.Connection,
+    schema_path: str | Path | None = None,
+    with_claims: bool = False,
+) -> None:
+    """Initialize the database schema. Idempotent — uses IF NOT EXISTS throughout.
+
+    Installs only the core registry (collection/document/document_tag/
+    document_dependency/document_fts/projection_cache/ingest_log/source) by
+    default. The claim/entity/relationship/contradiction knowledge-extraction
+    subsystem (Proposal A) is a separate, optional module: pass
+    `with_claims=True` to also install it, or call `install_claims_module()`
+    directly on an already-initialized database. This is deliberately
+    explicit-opt-in only — there is no "install lazily on first ingest"
+    path, so that `claims_module_present()` is a reliable signal of intent
+    rather than an accident of call order.
+    """
     path = Path(schema_path) if schema_path else SCHEMA_PATH
     ddl = path.read_text()
     conn.executescript(ddl)
+    # source.md migrations are core-table migrations and always run,
+    # regardless of whether the claims module is installed.
     migrate_source_type_taxonomy(conn)
     migrate_document_fts_body_column(conn)
     logger.info("Database schema initialized from %s", path)
+    if with_claims:
+        install_claims_module(conn)
+
+
+def install_claims_module(conn: sqlite3.Connection, schema_path: str | Path | None = None) -> None:
+    """Install the optional claim/entity/relationship/contradiction module.
+
+    Idempotent — the DDL uses `IF NOT EXISTS` throughout, so calling this on
+    a database that already has the module installed is a no-op. The core
+    registry (see `init_db`) must already be installed, since claim-side
+    tables reference core tables (`claim.source_id` -> `source.source_id`).
+    """
+    path = Path(schema_path) if schema_path else CLAIMS_SCHEMA_PATH
+    ddl = path.read_text()
+    conn.executescript(ddl)
+    logger.info("Claims module installed from %s", path)
+
+
+def claims_module_present(conn: sqlite3.Connection) -> bool:
+    """Return True if the optional claims module is installed on this database.
+
+    Checks for the `entity` table, which is created only by
+    `install_claims_module()` / `init_db(..., with_claims=True)`.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entity'"
+    ).fetchone()
+    return row is not None
 
 
 # Governance-artifact source_type values added in issue #15. An existing DB

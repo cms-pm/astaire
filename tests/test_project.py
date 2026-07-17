@@ -206,6 +206,46 @@ class TestL0:
         assert "Entity registry (0 entities)" in content
 
 
+# ── Proposal A: L0 on a core-only DB (claims module not installed) ──
+
+
+class TestL0CoreOnlyDb:
+    """build_l0_content()/generate_l0() must not crash when the optional
+    claims module isn't installed, and must omit (not zero-out) the
+    claim-side sections and metric lines entirely."""
+
+    def test_generate_l0_does_not_crash(self, db_conn_core_only):
+        content = generate_l0(db_conn_core_only)
+        assert "# Knowledge base state" in content
+
+    def test_omits_entity_registry_section(self, db_conn_core_only):
+        content = generate_l0(db_conn_core_only)
+        assert "Entity registry" not in content
+
+    def test_omits_hot_topics_section(self, db_conn_core_only):
+        content = generate_l0(db_conn_core_only)
+        assert "Hot topics" not in content
+
+    def test_omits_open_contradictions_section(self, db_conn_core_only):
+        content = generate_l0(db_conn_core_only)
+        assert "Open contradictions" not in content
+
+    def test_omits_claims_module_metric_lines(self, db_conn_core_only):
+        content = generate_l0(db_conn_core_only)
+        assert "Total active claims:" not in content
+        assert "Total entities:" not in content
+        assert "Total relationships:" not in content
+
+    def test_still_includes_core_sections(self, db_conn_core_only):
+        content = generate_l0(db_conn_core_only)
+        assert "Document registry" in content
+        assert "Recent activity" in content
+        assert "Key metrics" in content
+        assert "Total sources:" in content
+        assert "Total documents:" in content
+        assert "Total collections:" in content
+
+
 # ── Cache Invalidation Tests ───────────────────────────────────
 
 

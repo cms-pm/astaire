@@ -258,3 +258,36 @@ class TestEmptyDatabase:
         assert "No entities registered" in index
         contras = (wiki_dir / "contradictions.md").read_text()
         assert "No open contradictions" in contras
+
+
+# ── Regression: B1 — export_wiki() must not destroy output before ──
+# ── checking claims-module presence on a core-only DB ──────────────
+
+class TestCoreOnlyGuard:
+    def test_raises_without_deleting_existing_output(self, db_conn_core_only, tmp_path):
+        wiki_dir = tmp_path / "wiki"
+        wiki_dir.mkdir()
+        existing = wiki_dir / "keepme.md"
+        existing.write_text("do not delete me")
+
+        with pytest.raises(RuntimeError, match="Claims module not installed"):
+            export_wiki(db_conn_core_only, output_dir=wiki_dir)
+
+        # The pre-existing wiki output must survive the failed export
+        # untouched — this is the destroy-before-check ordering bug (B1).
+        assert existing.exists()
+        assert existing.read_text() == "do not delete me"
+
+    def test_raises_without_creating_output_when_absent(self, db_conn_core_only, tmp_path):
+        wiki_dir = tmp_path / "wiki"
+        assert not wiki_dir.exists()
+
+        with pytest.raises(RuntimeError, match="Claims module not installed"):
+            export_wiki(db_conn_core_only, output_dir=wiki_dir)
+
+        assert not wiki_dir.exists()
+
+    def test_error_message_hints_enable_command(self, db_conn_core_only, tmp_path):
+        wiki_dir = tmp_path / "wiki"
+        with pytest.raises(RuntimeError, match="astaire init --with-claims"):
+            export_wiki(db_conn_core_only, output_dir=wiki_dir)

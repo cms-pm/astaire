@@ -11,7 +11,7 @@ import logging
 import time
 import sqlite3
 
-from src.db import transaction
+from src.db import claims_module_present, transaction
 from src.project import build_l0_content, generate_l0, generate_l1_entity, read_cache
 from src.utils import hashing, tokens, ulid
 
@@ -38,7 +38,14 @@ TAG_DRIFT_LOW_THRESHOLD = 0.1
 
 
 def check_orphan_entities(conn: sqlite3.Connection) -> list[dict]:
-    """SCN-5.1-01: Detect entities with zero active claims."""
+    """SCN-5.1-01: Detect entities with zero active claims.
+
+    Claims-module check (Proposal A) — returns [] when the module isn't
+    installed rather than raising sqlite3.OperationalError on the missing
+    `entity`/`claim` tables.
+    """
+    if not claims_module_present(conn):
+        return []
     rows = conn.execute(
         """SELECT e.entity_id, e.canonical_name FROM entity e
            LEFT JOIN claim c ON c.entity_id = e.entity_id
@@ -54,7 +61,13 @@ def check_orphan_entities(conn: sqlite3.Connection) -> list[dict]:
 
 
 def check_orphan_claims(conn: sqlite3.Connection) -> list[dict]:
-    """SCN-5.1-02: Detect claims referencing non-existent entities."""
+    """SCN-5.1-02: Detect claims referencing non-existent entities.
+
+    Claims-module check (Proposal A) — returns [] when the module isn't
+    installed. See `check_orphan_entities`.
+    """
+    if not claims_module_present(conn):
+        return []
     rows = conn.execute(
         """SELECT c.claim_id, c.entity_id FROM claim c
            LEFT JOIN entity e ON e.entity_id = c.entity_id
@@ -68,7 +81,13 @@ def check_orphan_claims(conn: sqlite3.Connection) -> list[dict]:
 
 
 def check_open_contradictions(conn: sqlite3.Connection) -> list[dict]:
-    """SCN-5.1-03: List all open contradictions."""
+    """SCN-5.1-03: List all open contradictions.
+
+    Claims-module check (Proposal A) — returns [] when the module isn't
+    installed. See `check_orphan_entities`.
+    """
+    if not claims_module_present(conn):
+        return []
     rows = conn.execute("SELECT * FROM v_open_contradictions").fetchall()
     return [
         {"severity": "warning", "contradiction_id": r["contradiction_id"],
@@ -79,7 +98,13 @@ def check_open_contradictions(conn: sqlite3.Connection) -> list[dict]:
 
 
 def check_stale_claims(conn: sqlite3.Connection, days: int = 90) -> list[dict]:
-    """SCN-5.1-04: Flag provisional claims older than threshold."""
+    """SCN-5.1-04: Flag provisional claims older than threshold.
+
+    Claims-module check (Proposal A) — returns [] when the module isn't
+    installed. See `check_orphan_entities`.
+    """
+    if not claims_module_present(conn):
+        return []
     rows = conn.execute(
         """SELECT claim_id, entity_id, predicate, updated_at FROM claim
            WHERE epistemic_tag = 'provisional'
@@ -98,7 +123,13 @@ def check_stale_claims(conn: sqlite3.Connection, days: int = 90) -> list[dict]:
 def check_hub_score_anomalies(
     conn: sqlite3.Connection, fix: bool = False,
 ) -> list[dict]:
-    """SCN-5.1-05: Flag high-hub entities without L1 cache. Optionally generate it."""
+    """SCN-5.1-05: Flag high-hub entities without L1 cache. Optionally generate it.
+
+    Claims-module check (Proposal A) — returns [] when the module isn't
+    installed. See `check_orphan_entities`.
+    """
+    if not claims_module_present(conn):
+        return []
     rows = conn.execute(
         """SELECT entity_id, canonical_name, hub_score FROM v_entity_hub_scores
            WHERE hub_score >= 5"""
@@ -169,7 +200,13 @@ def check_l0_staleness(
 def check_unbounded_clusters(
     conn: sqlite3.Connection, threshold: int = 200,
 ) -> list[dict]:
-    """SCN-5.1-07: Flag topic clusters exceeding claim count threshold."""
+    """SCN-5.1-07: Flag topic clusters exceeding claim count threshold.
+
+    Claims-module check (Proposal A) — returns [] when the module isn't
+    installed. See `check_orphan_entities`.
+    """
+    if not claims_module_present(conn):
+        return []
     rows = conn.execute(
         "SELECT cluster_id, label, claim_count FROM topic_cluster WHERE claim_count > ?",
         (threshold,),
@@ -322,6 +359,48 @@ def check_l0_performance(
     return [issue]
 
 
+def check_claims_module_status(conn: sqlite3.Connection) -> dict:
+    """Informational (not pass/fail) report on the optional claims module.
+
+    Returns `{"installed": False}` when the module (Proposal A) hasn't been
+    opted into via `astaire init --with-claims`. When installed, also
+    reports the total row count across the claim-side tables and the most
+    recent write timestamp: the max `updated_at` across `entity`/`claim`,
+    or (if no claim-side rows exist yet) the most recent `ingest_log` row
+    that actually wrote claims/entities (`entities_created > 0` OR
+    `claims_created > 0`). Either may be None if the module is installed
+    but has never been written to.
+    """
+    if not claims_module_present(conn):
+        return {"installed": False}
+
+    row_count = 0
+    for table in ("entity", "claim", "relationship", "contradiction", "topic_cluster"):
+        row_count += conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+
+    last_write = conn.execute(
+        """SELECT MAX(ts) AS last_write FROM (
+               SELECT MAX(updated_at) AS ts FROM entity
+               UNION ALL
+               SELECT MAX(updated_at) AS ts FROM claim
+           )"""
+    ).fetchone()["last_write"]
+
+    if last_write is None:
+        last_write = conn.execute(
+            """SELECT created_at FROM ingest_log
+               WHERE entities_created > 0 OR claims_created > 0
+               ORDER BY created_at DESC LIMIT 1"""
+        ).fetchone()
+        last_write = last_write["created_at"] if last_write else None
+
+    return {
+        "installed": True,
+        "row_count": row_count,
+        "last_write": last_write,
+    }
+
+
 def run_all_checks(
     conn: sqlite3.Connection, fix: bool = False,
 ) -> dict:
@@ -338,6 +417,7 @@ def run_all_checks(
     results["missing_documents"] = check_missing_documents(conn)
     results["tag_vocabulary_drift"] = check_tag_vocabulary_drift(conn)
     results["l0_performance"] = check_l0_performance(conn)
+    results["claims_module_status"] = check_claims_module_status(conn)
 
     total_warnings = 0
     total_errors = 0

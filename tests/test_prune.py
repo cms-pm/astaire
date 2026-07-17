@@ -268,3 +268,41 @@ class TestPruneQueryLog:
     def test_no_query_rows_returns_zero(self, db_conn):
         deleted = prune_query_log(db_conn)
         assert deleted == 0
+
+
+# ── Regression: B3 — prune_expired_claims() must no-op cleanly on a ──
+# ── core-only DB, so `astaire prune` can still prune the query log ───
+
+class TestCoreOnlyGuard:
+    def test_prune_expired_claims_is_a_noop_on_core_only_db(self, db_conn_core_only):
+        result = prune_expired_claims(db_conn_core_only)
+        assert result == {
+            "claims_pruned": 0,
+            "clusters_cleaned": 0,
+            "l0_regenerated": False,
+        }
+
+    def test_prune_expired_claims_does_not_raise_on_core_only_db(self, db_conn_core_only):
+        # No `claim` table exists on a core-only DB — prior to the B3 fix
+        # this raised sqlite3.OperationalError("no such table: claim").
+        try:
+            prune_expired_claims(db_conn_core_only)
+        except Exception as exc:  # pragma: no cover - failure path documented
+            pytest.fail(f"prune_expired_claims() raised on core-only DB: {exc!r}")
+
+    def test_query_log_still_prunes_on_core_only_db_via_cmd_prune_sequence(self, db_conn_core_only):
+        """Mirrors cmd_prune()'s exact call sequence in src/cli.py: even
+        though prune_expired_claims() runs first, it must not prevent
+        prune_query_log() (a core-registry feature, unrelated to claims)
+        from running afterward."""
+        old_id = _insert_ingest_log(db_conn_core_only, "query", "2000-01-01T00:00:00Z")
+
+        stats = prune_expired_claims(db_conn_core_only)
+        query_log_pruned = prune_query_log(db_conn_core_only)
+
+        assert stats["claims_pruned"] == 0
+        assert query_log_pruned == 1
+        row = db_conn_core_only.execute(
+            "SELECT * FROM ingest_log WHERE log_id = ?", (old_id,)
+        ).fetchone()
+        assert row is None

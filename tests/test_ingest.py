@@ -224,6 +224,16 @@ class TestScanDirectory:
 class TestIngestSource:
     """SCN-4.2-01 through SCN-4.2-07."""
 
+    def test_raises_cleanly_without_claims_module(self, db_conn_core_only, sample_file):
+        """Proposal A: ingest_source() extracts claims/entities, which requires
+        the optional claims module. On a core-only DB it must fail with an
+        actionable RuntimeError before writing anything (including `source`)."""
+        with pytest.raises(RuntimeError, match="astaire init --with-claims"):
+            ingest_source(db_conn_core_only, sample_file, "article", "Test Source")
+
+        count = db_conn_core_only.execute("SELECT COUNT(*) FROM source").fetchone()[0]
+        assert count == 0
+
     def test_creates_source_row(self, db_conn, sample_file):
         """SCN-4.2-01: creates source with hash, path, token_count."""
         result = ingest_source(db_conn, sample_file, "article", "Test Source")

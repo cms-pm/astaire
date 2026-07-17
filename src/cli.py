@@ -30,8 +30,10 @@ def _setup_logging(verbose: bool = False) -> None:
 def cmd_init(args: argparse.Namespace) -> None:
     """Initialize the database schema."""
     with managed_connection(args.db) as conn:
-        init_db(conn)
+        init_db(conn, with_claims=args.with_claims)
     print(f"Database initialized: {args.db or DB_PATH}")
+    if args.with_claims:
+        print("  Claims module installed (entity/claim/relationship/contradiction)")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -63,7 +65,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     schema_ok = False
     try:
         with managed_connection(args.db) as conn:
-            required_tables = {"collection", "document", "entity", "source", "claim"}
+            required_tables = {"collection", "document", "source"}
             rows = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
@@ -75,6 +77,12 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             else:
                 print("[WARN] Database schema incomplete or not initialized")
                 print("       Run 'astaire init' or 'astaire startup' to create the schema.")
+
+            from src.db import claims_module_present
+            if claims_module_present(conn):
+                print("[INFO] Claims module: installed")
+            else:
+                print("[INFO] Claims module: not installed (run 'astaire init --with-claims' to enable)")
     except SystemExit as exc:
         print(str(exc))
         failures += 1
@@ -301,7 +309,7 @@ def cmd_lint(args: argparse.Namespace) -> None:
         results = run_all_checks(conn, fix=args.fix)
 
         for check_name, issues in results.items():
-            if check_name in ("total_warnings", "total_errors"):
+            if check_name in ("total_warnings", "total_errors", "claims_module_status"):
                 continue
             if not isinstance(issues, list) or not issues:
                 continue
@@ -311,6 +319,18 @@ def cmd_lint(args: argparse.Namespace) -> None:
                 msg = issue.get("message", "")
                 fixed = " [FIXED]" if issue.get("fixed") else ""
                 print(f"  [{sev:7s}] {msg}{fixed}")
+
+        # claims_module_status is informational (dict-shaped, not a
+        # list of issues) and printed separately from the pass/fail checks.
+        status = results.get("claims_module_status", {})
+        if status.get("installed"):
+            print(
+                f"\nclaims_module_status: installed "
+                f"({status.get('row_count', 0)} row(s), "
+                f"last write: {status.get('last_write') or 'never'})"
+            )
+        else:
+            print("\nclaims_module_status: not installed (run 'astaire init --with-claims' to enable)")
 
         print(f"\nTotal: {results['total_warnings']} warnings, {results['total_errors']} errors")
 
@@ -530,7 +550,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     # init
-    sub.add_parser("init", help="Initialize database schema")
+    p_init = sub.add_parser("init", help="Initialize database schema")
+    p_init.add_argument(
+        "--with-claims",
+        action="store_true",
+        help="Also install the optional claims module (entity/claim/relationship/contradiction)",
+    )
 
     # startup
     p_startup = sub.add_parser("startup", help="Session startup: init + scan + sync + status")
@@ -661,6 +686,12 @@ def main() -> None:
             print(f"Error: database not initialized. Run 'astaire init' first.", file=sys.stderr)
             sys.exit(1)
         raise
+    except RuntimeError as exc:
+        # Claims-module-absent guards (ingest_source, export_wiki,
+        # import_graphify) raise a plain RuntimeError with an actionable
+        # enable-hint. Print it cleanly instead of a raw traceback.
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

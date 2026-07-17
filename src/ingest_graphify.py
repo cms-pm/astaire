@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from src.db import get_connection, transaction
+from src.db import claims_module_present, get_connection, transaction
 from src.project import build_l0_content, generate_l0, invalidate_cache, read_cache
 from src.utils import hashing, tokens, ulid
 
@@ -82,7 +82,22 @@ def import_graphify(
     l0_token_budget: int = 2000,
     encoding: str = "cl100k_base",
 ) -> dict:
-    """Import promoted graphify nodes and relationships into Astaire."""
+    """Import promoted graphify nodes and relationships into Astaire.
+
+    Raises RuntimeError if the optional claims module (Proposal A) is not
+    installed on this database — checked before any write (including the
+    `source` row created by `_ensure_graphify_source`, on both the cache-hit
+    and cache-miss paths) so a call against a core-only database never
+    leaves an orphan `source` row behind.
+    """
+    if not claims_module_present(conn):
+        raise RuntimeError(
+            "Claims module not installed on this database. "
+            "import_graphify() writes entities/relationships derived from "
+            "the graphify skeleton, which requires the optional claims "
+            "module. Run 'astaire init --with-claims' to enable it."
+        )
+
     path = Path(graph_json_path)
     if not path.exists():
         raise FileNotFoundError(f"graph.json not found: {path}")

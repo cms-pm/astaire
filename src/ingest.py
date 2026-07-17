@@ -12,7 +12,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from src.db import transaction
+from src.db import claims_module_present, transaction
 from src.project import generate_l0, invalidate_cache
 from src.registry import get_collection, query_documents, register_document
 from src.utils import hashing, tokens, ulid
@@ -244,7 +244,21 @@ def ingest_source(
 
     Returns dict with keys: source_id, duplicate, entities_created, claims_created,
                             contradictions_found.
+
+    Raises RuntimeError if the optional claims module (Proposal A) is not
+    installed on this database — checked before any write (including the
+    `source` row) so a call against a core-only database never leaves a
+    partially-written source behind.
     """
+    if not claims_module_present(conn):
+        raise RuntimeError(
+            "Claims module not installed on this database. "
+            "ingest_source() extracts entities/claims/relationships, which "
+            "requires the optional claims module. Run "
+            "'astaire init --with-claims' to enable it, or use "
+            "ingest_document() for document-only registration."
+        )
+
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Source file not found: {path}")
