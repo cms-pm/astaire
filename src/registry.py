@@ -277,16 +277,44 @@ def get_by_external_id(
     return _enrich_document(conn, dict(row))
 
 
+def _escape_like(value: str) -> str:
+    """Escape SQLite LIKE wildcards (`%`, `_`) in a caller-supplied literal.
+
+    Used for tag-value prefix matching (Proposal B item 3): a real tag value
+    that happens to contain a literal `%` or `_` must not be interpreted as
+    an unintended wildcard once it is turned into a `LIKE 'prefix%'` pattern.
+    Pairs with `ESCAPE '\\'` on the SQL side.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def query_documents(
     conn: sqlite3.Connection,
     collection_name: str | None = None,
     doc_type: str | None = None,
     tags: dict[str, str] | None = None,
+    tag_prefixes: dict[str, str] | None = None,
     status: str | None = None,
 ) -> list[dict]:
     """Query documents with optional filters. Returns list of dicts with tags.
 
-    tags filter: {"stage": "implementation"} matches documents tagged stage=implementation.
+    tags filter: {"stage": "implementation"} matches documents tagged
+    stage=implementation exactly. This remains the default, unchanged
+    behavior.
+
+    tag_prefixes filter (Proposal B item 3): {"chunk": "7.1"} matches any
+    document tagged chunk=<value> where <value> starts with "7.1" — e.g.
+    "7.1", "7.1.16", "7.1.2-rc". This exists for hierarchical/dotted
+    vocabularies where real deployments tag documents coarser ("chunk=7.1")
+    than a caller's query is scoped ("chunk=7.1.16"): an exact-match query
+    against the fine-grained value would otherwise return zero rows even
+    though the coarser tag is a legitimate match. Implemented as a bound
+    `LIKE` parameter (never string-concatenated SQL); any `%` or `_`
+    literally present in the supplied prefix is escaped via `_escape_like`
+    so it cannot behave as an unintended wildcard. `tags` and
+    `tag_prefixes` may be combined (AND semantics across both, same as
+    combining `tags` with `doc_type`/`status`); a key present in both is
+    treated as two independent conditions.
     """
     sql = "SELECT d.* FROM document d"
     joins = []
@@ -314,6 +342,15 @@ def query_documents(
             )
             conditions.append(f"{alias}.tag_key = ? AND {alias}.tag_value = ?")
             params.extend([key, value])
+
+    if tag_prefixes:
+        for i, (key, prefix) in enumerate(tag_prefixes.items()):
+            alias = f"tp{i}"
+            joins.append(
+                f"JOIN document_tag {alias} ON {alias}.document_id = d.document_id"
+            )
+            conditions.append(f"{alias}.tag_key = ? AND {alias}.tag_value LIKE ? ESCAPE '\\'")
+            params.extend([key, _escape_like(prefix) + "%"])
 
     sql += " " + " ".join(joins)
     if conditions:

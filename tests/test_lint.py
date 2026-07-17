@@ -13,6 +13,7 @@ from src.lint import (
     check_orphan_claims,
     check_orphan_entities,
     check_stale_claims,
+    check_tag_vocabulary_drift,
     check_unbounded_clusters,
     run_all_checks,
 )
@@ -334,6 +335,63 @@ class TestMissingDocuments:
         register_document(db_conn, "test-exists", f, "spec", "Exists Doc")
         issues = check_missing_documents(db_conn)
         assert len(issues) == 0
+
+
+# ── SCN-5.1-13: Tag vocabulary drift ────────────────────────────
+
+class TestTagVocabularyDrift:
+    def _register_docs(
+        self, db_conn, tmp_path, collection_name, doc_type, count, tagged_count,
+        tag_key="phase", tag_value="1",
+    ):
+        """Register `count` documents of `doc_type`, tagging the first `tagged_count`."""
+        for i in range(count):
+            f = tmp_path / f"{collection_name}-{doc_type}-{i}.md"
+            f.write_text(f"Content {collection_name} {doc_type} {i}")
+            tags = {tag_key: tag_value} if i < tagged_count else None
+            register_document(
+                db_conn, collection_name, f, doc_type, f"{doc_type} {i}", tags=tags,
+            )
+
+    def test_no_drift_with_even_coverage(self, db_conn, tmp_path):
+        create_collection(db_conn, "even-coverage", config={"tag_keys": ["phase"]})
+        self._register_docs(db_conn, tmp_path, "even-coverage", "spec", count=10, tagged_count=6)
+        self._register_docs(db_conn, tmp_path, "even-coverage", "plan", count=10, tagged_count=7)
+        issues = check_tag_vocabulary_drift(db_conn)
+        assert issues == []
+
+    def test_flags_evidenced_drift_shape(self, db_conn, tmp_path):
+        # Mirrors the real evidenced case: phase= is heavily used on one
+        # doc_type but almost never used on another doc_type in the same
+        # collection, despite both sharing the collection's declared
+        # tag_keys vocabulary.
+        create_collection(db_conn, "drift-collection", config={"tag_keys": ["phase"]})
+        self._register_docs(
+            db_conn, tmp_path, "drift-collection", "board-review", count=10, tagged_count=9,
+        )
+        self._register_docs(
+            db_conn, tmp_path, "drift-collection", "chunk-plan", count=10, tagged_count=0,
+        )
+        issues = check_tag_vocabulary_drift(db_conn)
+        assert len(issues) == 1
+        issue = issues[0]
+        assert issue["severity"] == "warning"
+        assert issue["tag_key"] == "phase"
+        assert "board-review" in issue["message"]
+        assert "chunk-plan" in issue["message"]
+
+    def test_no_flag_when_collection_declares_no_tag_keys(self, db_conn, tmp_path):
+        create_collection(db_conn, "no-vocab", config={})
+        self._register_docs(db_conn, tmp_path, "no-vocab", "spec", count=5, tagged_count=5)
+        self._register_docs(db_conn, tmp_path, "no-vocab", "plan", count=5, tagged_count=0)
+        issues = check_tag_vocabulary_drift(db_conn)
+        assert issues == []
+
+    def test_no_flag_with_single_doc_type(self, db_conn, tmp_path):
+        create_collection(db_conn, "single-type", config={"tag_keys": ["phase"]})
+        self._register_docs(db_conn, tmp_path, "single-type", "spec", count=10, tagged_count=0)
+        issues = check_tag_vocabulary_drift(db_conn)
+        assert issues == []
 
 
 # ── SCN-5.1-10: L0 performance ──────────────────────────────────

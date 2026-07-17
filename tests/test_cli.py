@@ -121,7 +121,7 @@ def sample_project(tmp_path):
 
 def _args(**kwargs):
     """Build a Namespace with defaults."""
-    defaults = {"db": None, "verbose": False, "no_sync": False}
+    defaults = {"db": None, "verbose": False, "no_sync": False, "tag_prefix": None}
     defaults.update(kwargs)
     return Namespace(**defaults)
 
@@ -447,6 +447,78 @@ class TestQuery:
         assert "0 document(s) found" in out
         assert "searched fields:" in out
         assert "doc_types in scope:" in out
+
+
+class TestQueryTagPrefix:
+    """Proposal B item 3: --tag-prefix CLI flag for hierarchical tag queries."""
+
+    def test_tag_prefix_matches_hierarchical_values(self, tmp_db, capsys):
+        conn = get_connection(tmp_db)
+        create_collection(conn, "chunked", config={})
+        conn.close()
+
+        f1 = Path(tmp_db).parent / "coarse.md"
+        f1.write_text("Coarse chunk doc")
+        f2 = Path(tmp_db).parent / "fine.md"
+        f2.write_text("Fine chunk doc")
+
+        conn = get_connection(tmp_db)
+        register_document(conn, "chunked", f1, "spec", "Coarse", tags={"chunk": "7.1"})
+        register_document(conn, "chunked", f2, "spec", "Fine", tags={"chunk": "7.1.16"})
+        conn.close()
+
+        cmd_query(_args(
+            db=tmp_db, collection="chunked",
+            type=None, status=None, tag=None, tag_prefix=["chunk=7.1"], fts=None, json=False,
+        ))
+        out = capsys.readouterr().out
+        assert "2 document(s) found" in out
+
+
+class TestQueryLog:
+    """Proposal B item 5: query operations write an ingest_log row."""
+
+    @pytest.fixture
+    def query_db(self, tmp_path, sample_project):
+        db_path = str(tmp_path / "query.db")
+        cmd_init(_args(db=db_path))
+        cmd_scan(_args(db=db_path, root=str(sample_project), collection=None))
+        conn = get_connection(db_path)
+        col_name = conn.execute("SELECT name FROM collection LIMIT 1").fetchone()["name"]
+        conn.close()
+        return db_path, col_name
+
+    def test_query_writes_ingest_log_row_with_filters_and_hit_count(self, query_db, capsys):
+        db_path, col_name = query_db
+        cmd_query(_args(
+            db=db_path, collection=col_name,
+            type=None, status=None, tag=None, fts=None, json=False,
+        ))
+        out = capsys.readouterr().out
+        hit_count = int(out.split(" document(s) found")[0].strip())
+
+        conn = get_connection(db_path)
+        rows = conn.execute("SELECT * FROM ingest_log WHERE operation = 'query'").fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert f"{hit_count} hit(s)" in rows[0]["summary"]
+        assert f"collection={col_name}" in rows[0]["summary"]
+
+    def test_query_log_summary_reflects_fts_query(self, query_db, capsys):
+        db_path, _ = query_db
+        cmd_query(_args(
+            db=db_path, collection=None,
+            type=None, status=None, tag=None, fts="registry", json=False,
+        ))
+        capsys.readouterr()
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT * FROM ingest_log WHERE operation = 'query' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert "registry" in row["summary"]
+        assert "hit(s)" in row["summary"]
 
 
 # ── Context ──────────────────────────────────────────────────────

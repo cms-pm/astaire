@@ -147,6 +147,53 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 print(f"  archived             {c['title']}")
 
 
+def _write_query_log(conn: sqlite3.Connection, summary: str) -> str:
+    """Write an `operation='query'` ingest_log entry (Proposal B item 5).
+
+    `ingest_log.operation`'s CHECK constraint has permitted `'query'` since
+    the schema was written, but nothing ever wrote it — there was no
+    read-side usage record anywhere. `cmd_query` is the natural place: it
+    already has the full call arguments and the result count in hand right
+    after calling `query_documents`/`search_documents`. Follows the same
+    duplicated-locally `_write_ingest_log`-style helper idiom as
+    `ingest.py` rather than trying to unify the two — that's the
+    established pattern in this codebase. All numeric counters stay at
+    their column defaults (0); this operation didn't write anything, so
+    repurposing an unrelated write-side counter (e.g. documents_registered)
+    to mean "hit count" would be misleading. The hit count instead lives in
+    `summary`, in plain text, alongside what was actually searched/filtered.
+    """
+    from src.db import transaction
+    from src.utils import ulid
+
+    log_id = ulid.generate()
+    with transaction(conn) as cur:
+        cur.execute(
+            "INSERT INTO ingest_log (log_id, operation, summary) VALUES (?, 'query', ?)",
+            (log_id, summary),
+        )
+    return log_id
+
+
+def _describe_query(args: argparse.Namespace, hit_count: int) -> str:
+    """Render the filters/query actually used for `_write_query_log`'s summary."""
+    if args.fts:
+        return f"Query (fts={args.fts!r}): {hit_count} hit(s)"
+    parts = []
+    if args.collection:
+        parts.append(f"collection={args.collection}")
+    if args.type:
+        parts.append(f"type={args.type}")
+    if args.status:
+        parts.append(f"status={args.status}")
+    if args.tag:
+        parts.append(f"tag={','.join(args.tag)}")
+    if getattr(args, "tag_prefix", None):
+        parts.append(f"tag_prefix={','.join(args.tag_prefix)}")
+    filters = ", ".join(parts) if parts else "no filters"
+    return f"Query ({filters}): {hit_count} hit(s)"
+
+
 def cmd_query(args: argparse.Namespace) -> None:
     """Query documents from the registry."""
     from src.registry import diagnose_zero_results, query_documents, search_documents
@@ -161,13 +208,22 @@ def cmd_query(args: argparse.Namespace) -> None:
                 for t in args.tag:
                     key, _, value = t.partition("=")
                     tags[key] = value
+            tag_prefixes = None
+            if getattr(args, "tag_prefix", None):
+                tag_prefixes = {}
+                for t in args.tag_prefix:
+                    key, _, value = t.partition("=")
+                    tag_prefixes[key] = value
             docs = query_documents(
                 conn,
                 collection_name=args.collection,
                 doc_type=args.type,
                 tags=tags,
+                tag_prefixes=tag_prefixes,
                 status=args.status,
             )
+
+        _write_query_log(conn, _describe_query(args, len(docs)))
 
         if args.json:
             for d in docs:
@@ -496,6 +552,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("-t", "--type", help="Filter by doc_type")
     p_query.add_argument("-s", "--status", help="Filter by status")
     p_query.add_argument("--tag", action="append", help="Filter by tag (key=value), repeatable")
+    p_query.add_argument(
+        "--tag-prefix",
+        action="append",
+        help="Filter by tag-value prefix (key=value), repeatable — matches "
+        "documents whose tag_value for key starts with value, e.g. "
+        "--tag-prefix chunk=7.1 matches chunk=7.1, chunk=7.1.16, etc.",
+    )
     p_query.add_argument(
         "--fts",
         help="Full-text search over title/external_id/doc_type, plus document "

@@ -253,6 +253,78 @@ class TestQuery:
         assert results == []
 
 
+class TestTagPrefixQuery:
+    """Proposal B item 3: prefix matching for hierarchical tag vocabularies."""
+
+    def test_exact_match_still_exact_by_default(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "Coarse",
+            tags={"chunk": "7.1"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "Fine",
+            tags={"chunk": "7.1.16"},
+        )
+        results = query_documents(db_conn, tags={"chunk": "7.1"})
+        assert [r["title"] for r in results] == ["Coarse"]
+
+    def test_prefix_matches_hierarchical_values(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "Coarse",
+            tags={"chunk": "7.1"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "Fine",
+            tags={"chunk": "7.1.16"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc3"], "spec", "Unrelated",
+            tags={"chunk": "8.1"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"chunk": "7.1"})
+        titles = {r["title"] for r in results}
+        assert titles == {"Coarse", "Fine"}
+
+    def test_prefix_does_not_match_short_common_substring(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "Target",
+            tags={"chunk": "7.1"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "SharesSubstring",
+            tags={"chunk": "17.1"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"chunk": "7.1"})
+        titles = {r["title"] for r in results}
+        assert titles == {"Target"}
+
+    def test_literal_percent_in_prefix_not_treated_as_wildcard(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "PercentLiteral",
+            tags={"progress": "50%off"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "WouldFalseMatch",
+            tags={"progress": "50zoff"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"progress": "50%"})
+        titles = {r["title"] for r in results}
+        assert titles == {"PercentLiteral"}
+
+    def test_literal_underscore_in_prefix_not_treated_as_wildcard(self, db_conn, collection, sample_docs):
+        register_document(
+            db_conn, "test-collection", sample_docs["doc1"], "spec", "UnderscoreLiteral",
+            tags={"slug": "50_off"},
+        )
+        register_document(
+            db_conn, "test-collection", sample_docs["doc2"], "spec", "WouldFalseMatch",
+            tags={"slug": "50zoff"},
+        )
+        results = query_documents(db_conn, tag_prefixes={"slug": "50_"})
+        titles = {r["title"] for r in results}
+        assert titles == {"UnderscoreLiteral"}
+
+
 class TestFullTextSearch:
     """Proposal B item 1: honest --fts, opt-in size-gated content indexing."""
 
