@@ -1,6 +1,6 @@
 # Astaire
 
-A hybrid memory palace — structured, persistent knowledge store that sits between raw source documents and LLM reasoning. Astaire provides two complementary subsystems: a **claim store** for structured knowledge extraction (entities, claims, relationships, contradictions) and a **document registry** for fast, indexed storage and retrieval of any file set. The core is document-type agnostic; applications plug in as "collections" with their own document types, tags, and lifecycle conventions.
+A hybrid memory palace — structured, persistent knowledge store that sits between raw source documents and LLM reasoning. Astaire's core is a **document registry** for fast, indexed storage and retrieval of any file set. On top of that, an **optional claims module** adds structured knowledge extraction (entities, claims, relationships, contradictions) — it is off by default and enabled explicitly with `astaire init --with-claims`. The core is document-type agnostic; applications plug in as "collections" with their own document types, tags, and lifecycle conventions.
 
 ## Why Astaire?
 
@@ -139,19 +139,24 @@ Collections are auto-discovered on startup and scan. See [Collection Authoring G
 
 | Command | Purpose |
 |---------|---------|
-| `astaire init` | Initialize database schema |
+| `astaire init [--with-claims]` | Initialize database schema (add `--with-claims` to install the optional claim store) |
 | `astaire startup --root .` | Full session startup (init + scan + sync + status) |
 | `astaire status` | Print L0 summary |
-| `astaire scan [--root .] [-c COLLECTION]` | Register new artifacts |
+| `astaire doctor` | Check database/schema/tokenizer readiness |
+| `astaire scan [--root .] [-c COLLECTION] [--no-sync]` | Register new artifacts (and refresh changed ones) |
 | `astaire sync [-c COLLECTION]` | Detect file drift |
-| `astaire query [-c COL] [-t TYPE] [--tag K=V] [--fts TERM] [--json]` | Query documents |
+| `astaire query [-c COL] [-t TYPE] [-s STATUS] [--tag K=V] [--tag-prefix K=V] [--fts TERM] [--json]` | Query documents |
 | `astaire context [-c COL] [--tag K=V] [--budget N]` | Assemble context |
 | `astaire lint [--fix]` | Health checks |
 | `astaire export [-o DIR]` | Generate wiki |
-| `astaire prune` | Remove expired claims |
-| `astaire ingest FILE --title T [--claims FILE]` | Ingest source document |
+| `astaire prune` | Remove expired claims and stale query-log entries |
+| `astaire reindex-content [-c COLLECTION]` | Backfill full-text content index for collections that opt into it |
+| `astaire ingest FILE --title T [--source-type TYPE] [--claims FILE]` | Ingest a source document |
+| `astaire graphify-import [--root .] [--graph PATH] [--threshold ...] [--auto-tune]` | Import graphify structural output |
 
 All commands accept `--db PATH` to use a non-default database and `-v` for verbose logging.
+
+**Optional claim store:** `ingest`, `export`, and `graphify-import` require the claims module and raise a clean error (no partial writes) if it isn't installed — run `astaire init --with-claims` first. `lint` and `prune` work on any database, degrading gracefully (skipping claim-side checks / no-op on claim pruning) when the module is absent. `scan`, `sync`, `query`, and `context` are document-registry operations and are unaffected either way.
 
 ## Benchmarks
 
