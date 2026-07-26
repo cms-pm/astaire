@@ -266,6 +266,14 @@ class TestL0Staleness:
         assert len(issues) == 1
         assert issues[0].get("fixed") is True
 
+    def test_own_lint_log_entry_does_not_cause_next_run_staleness(self, db_conn):
+        """astaire#28: a lint run's own ingest_log write must not make the
+        L0 cache it just regenerated look stale on the very next run."""
+        generate_l0(db_conn)
+        run_all_checks(db_conn, fix=True)  # writes ingest_log(operation='lint')
+        issues = check_l0_staleness(db_conn)
+        assert issues == []
+
 
 # ── SCN-5.1-07: Unbounded clusters ──────────────────────────────
 

@@ -146,10 +146,15 @@ def build_l0_content(conn: sqlite3.Connection) -> str:
     # The full history (queries included) is still available in the
     # ingest_log table itself and the wiki timeline (src/export.py) — this
     # only trims the short "what just happened" summary.
+    # 'lint' is excluded for a different reason (astaire#28): run_all_checks()
+    # writes its own ingest_log(operation='lint') row after computing this
+    # section, so a lint run's own log entry would otherwise appear in the
+    # L0 content that same run just cached, and the next lint invocation
+    # would see it missing from the cache and report a false staleness error.
     activity_lines = []
     log_rows = conn.execute(
         "SELECT operation, summary, created_at FROM ingest_log "
-        "WHERE operation NOT IN ('recompile', 'query') ORDER BY created_at DESC LIMIT 5"
+        "WHERE operation NOT IN ('recompile', 'query', 'lint') ORDER BY created_at DESC LIMIT 5"
     ).fetchall()
     for row in log_rows:
         activity_lines.append(f"- [{row['created_at']}] {row['operation']}: {row['summary'] or 'no summary'}")

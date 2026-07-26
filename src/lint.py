@@ -182,8 +182,19 @@ def check_l0_staleness(
     fresh_content = build_l0_content(conn)
 
     def _data_hash(content: str) -> str:
-        """Hash everything after the first line (timestamp header)."""
+        """Hash content minus fields that record the tool's own execution.
+
+        Strips the first line (timestamp header) and any "Last lint" line.
+        `Last lint` is written to `ingest_log` by this very check's caller
+        (`run_all_checks`) *after* this comparison runs, so including it in
+        the hash would make the cache perpetually one lint-run behind: every
+        `lint` (even with --fix) would report freshly-regenerated content as
+        stale on the very next invocation. See astaire#28.
+        """
         _, _, body = content.partition("\n")
+        body = "\n".join(
+            line for line in body.splitlines() if not line.startswith("- Last lint:")
+        )
         return hashing.hash_content(body)
 
     if _data_hash(cached_content) != _data_hash(fresh_content):
