@@ -6,6 +6,7 @@ that maps file patterns to document types and tags.
 """
 
 import logging
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -30,11 +31,16 @@ COLLECTION_CONFIG = {
         "board-decision",
         "board-selection",
         "board-member-profile",
+        "evaluation",
         "implementation-handoff",
         "implementation-plan",
         "validation-evidence",
         "exception-registry",
         "governance-manifest",
+        "seam-map",
+        "mutation-report",
+        "farley-scorecard",
+        "domain-glossary",
     ],
     "lifecycle_stages": [
         "ingest",
@@ -70,6 +76,7 @@ SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
     ("docs/planning/pool_questions/", "pool-question", {"stage_produced": "plan"}),
     ("docs/planning/scenarios/", "gherkin", {"stage_produced": "artifact-generation"}),
     ("docs/planning/chunks/", "chunk-plan", {"stage_produced": "plan"}),
+    ("docs/planning/evaluations/", "evaluation", {"stage_produced": "plan"}),
     ("docs/planning/signoffs.md", "signoff", {"stage_produced": "plan"}),
     ("docs/planning/traceability.md", "traceability", {"stage_produced": "artifact-generation"}),
     ("docs/planning/phase-", "risk-log", {"stage_produced": "plan"}),
@@ -82,6 +89,10 @@ SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
     ("docs/planning/implementation-plan.md", "implementation-plan", {"stage_produced": "plan"}),
     ("docs/governance/exceptions.yaml", "exception-registry", {}),
     ("governance.yaml", "governance-manifest", {"stage_produced": "ingest"}),
+    ("docs/evidence/seam-maps/", "seam-map", {"stage_produced": "validation"}),
+    ("docs/evidence/mutation/", "mutation-report", {"stage_produced": "validation"}),
+    ("docs/evidence/farley/", "farley-scorecard", {"stage_produced": "validation"}),
+    ("docs/glossary/", "domain-glossary", {"stage_produced": "plan"}),
     ("docs/releases/astaire/", "validation-evidence", {"stage_produced": "release", "bundle_type": "astaire"}),
     ("docs/releases/rtk/", "validation-evidence", {"stage_produced": "release", "bundle_type": "rtk"}),
     ("docs/releases/bootstrap/", "validation-evidence", {"stage_produced": "release", "bundle_type": "bootstrap"}),
@@ -92,6 +103,12 @@ def register_collection(conn: sqlite3.Connection) -> str:
     """Create the ai-dev-governance collection if it doesn't exist. Returns collection_id."""
     existing = get_collection(conn, COLLECTION_NAME)
     if existing:
+        if existing["config"] != COLLECTION_CONFIG:
+            conn.execute(
+                "UPDATE collection SET config_json = ? WHERE collection_id = ?",
+                (json.dumps(COLLECTION_CONFIG), existing["collection_id"]),
+            )
+            conn.commit()
         return existing["collection_id"]
     return create_collection(
         conn, COLLECTION_NAME, "SDLC artifacts for ai-dev-governance methodology", COLLECTION_CONFIG
@@ -152,13 +169,22 @@ def scan_and_register(
                 continue
 
             path_str = str(filepath)
-            if path_str in existing_paths:
-                continue
-
             tags = dict(base_tags)
             external_id = _extract_external_id(filepath, doc_type)
             _extract_phase_chunk_tags(filepath, tags)
             title = _derive_title(filepath, doc_type)
+
+            if path_str in existing_paths:
+                _refresh_existing_document(
+                    conn,
+                    col["collection_id"],
+                    path_str,
+                    doc_type,
+                    title,
+                    tags,
+                    external_id,
+                )
+                continue
 
             doc_id = register_document(
                 conn,
@@ -180,13 +206,22 @@ def scan_and_register(
 
     for filepath, doc_type, base_tags in _scan_governance_board(root):
         path_str = str(filepath)
-        if path_str in existing_paths:
-            continue
-
         tags = dict(base_tags)
         external_id = _extract_external_id(filepath, doc_type)
         _extract_phase_chunk_tags(filepath, tags)
         title = _derive_title(filepath, doc_type)
+
+        if path_str in existing_paths:
+            _refresh_existing_document(
+                conn,
+                col["collection_id"],
+                path_str,
+                doc_type,
+                title,
+                tags,
+                external_id,
+            )
+            continue
 
         doc_id = register_document(
             conn,
@@ -208,6 +243,48 @@ def scan_and_register(
 
     logger.info("Scanned and registered %d new documents in %s", len(registered), COLLECTION_NAME)
     return registered
+
+
+def _refresh_existing_document(
+    conn: sqlite3.Connection,
+    collection_id: str,
+    path_str: str,
+    doc_type: str,
+    title: str,
+    tags: dict[str, str | list[str]],
+    external_id: str | None,
+) -> None:
+    row = conn.execute(
+        "SELECT document_id FROM document WHERE collection_id = ? AND file_path = ?",
+        (collection_id, path_str),
+    ).fetchone()
+    if row is None:
+        return
+    doc_id = row["document_id"]
+    conn.execute(
+        """UPDATE document
+           SET doc_type = ?, title = ?, external_id = ?, status = 'active'
+           WHERE document_id = ?""",
+        (doc_type, title, external_id, doc_id),
+    )
+    conn.execute("DELETE FROM document_tag WHERE document_id = ?", (doc_id,))
+    _insert_tags(conn, doc_id, tags)
+    conn.commit()
+
+
+def _insert_tags(
+    conn: sqlite3.Connection,
+    document_id: str,
+    tags: dict[str, str | list[str]],
+) -> None:
+    for key, values in tags.items():
+        if isinstance(values, str):
+            values = [values]
+        for value in values:
+            conn.execute(
+                "INSERT OR IGNORE INTO document_tag (document_id, tag_key, tag_value) VALUES (?, ?, ?)",
+                (document_id, key.lower(), str(value).lower()),
+            )
 
 
 def _glob_dir_recursive(directory: Path) -> list[Path]:
@@ -266,8 +343,8 @@ def _extract_phase_chunk_tags(filepath: Path, tags: dict[str, str | list[str]]) 
     """Extract phase and chunk numbers from filename patterns."""
     name = filepath.stem
 
-    # phase-N from risk log filenames
-    m = re.search(r"phase-(\d+)", name)
+    # phase-N from risk log and planning filenames
+    m = re.search(r"phase-(\d+(?:\.\d+)?)", name)
     if m:
         tags["phase"] = m.group(1)
 
@@ -276,10 +353,14 @@ def _extract_phase_chunk_tags(filepath: Path, tags: dict[str, str | list[str]]) 
     if m:
         tags["chunk"] = m.group(1)
 
-    # SCN-X.Y from Gherkin — extract chunk
-    m = re.match(r"SCN-(\d+)\.(\d+)", name)
+    # SCN-X.Y from Gherkin and planning names — extract fractional phase
+    m = re.match(r"SCN-(\d+(?:\.\d+)?)", name)
     if m:
         tags["phase"] = m.group(1)
+
+    # SCN-X.Y from Gherkin — preserve the existing chunk tag shape
+    m = re.match(r"SCN-(\d+)\.(\d+)", name)
+    if m:
         tags["chunk"] = f"{m.group(1)}.{m.group(2)}"
 
 

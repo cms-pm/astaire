@@ -6,6 +6,7 @@ Honors the collectionStrategy field in governance.yaml when present.
 """
 
 import logging
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -20,6 +21,8 @@ COLLECTION_CONFIG = {
     "doc_types": [
         "core-policy",
         "adapter-spec",
+        "adapter-profile",
+        "provider-skill",
         "contract-schema",
         "template",
         "runbook",
@@ -52,6 +55,8 @@ COLLECTION_CONFIG = {
 
 SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
     ("core/",                    "core-policy",        {"policy_area": "core"}),
+    ("adapters/profiles/",       "adapter-profile",    {"policy_area": "profile"}),
+    ("adapters/providers/claude/skills/",  "provider-skill", {"policy_area": "provider"}),
     ("adapters/providers/",      "adapter-spec",       {"policy_area": "provider"}),
     ("adapters/tooling/",        "adapter-spec",       {"policy_area": "tooling"}),
     ("contracts/",               "contract-schema",    {"policy_area": "contracts"}),
@@ -64,6 +69,12 @@ SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
 def register_collection(conn: sqlite3.Connection) -> str:
     existing = get_collection(conn, COLLECTION_NAME)
     if existing:
+        if existing["config"] != COLLECTION_CONFIG:
+            conn.execute(
+                "UPDATE collection SET config_json = ? WHERE collection_id = ?",
+                (json.dumps(COLLECTION_CONFIG), existing["collection_id"]),
+            )
+            conn.commit()
         return existing["collection_id"]
     return create_collection(
         conn,

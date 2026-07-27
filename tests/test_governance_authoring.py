@@ -20,6 +20,8 @@ def authoring_tree(tmp_path):
 
     (tmp_path / "adapters" / "providers").mkdir(parents=True)
     (tmp_path / "adapters" / "providers" / "CLAUDE_CONTEXT_ADAPTER.md").write_text("# Claude\n")
+    (tmp_path / "adapters" / "profiles").mkdir(parents=True)
+    (tmp_path / "adapters" / "profiles" / "STRICT_BASELINE.md").write_text("# Strict\n")
     (tmp_path / "adapters" / "tooling").mkdir(parents=True)
     (tmp_path / "adapters" / "tooling" / "RTK_CONTEXT_ADAPTER.md").write_text("# RTK\n")
 
@@ -51,7 +53,8 @@ class TestRegisterCollection:
         register_collection(db_conn)
         col = get_collection(db_conn, COLLECTION_NAME)
         for dt in ("core-policy", "adapter-spec", "contract-schema", "template",
-                   "runbook", "compatibility-entry", "changelog-entry"):
+                   "runbook", "compatibility-entry", "changelog-entry",
+                   "adapter-profile"):
             assert dt in col["config"]["doc_types"]
 
 
@@ -62,6 +65,7 @@ class TestScanAndRegister:
         types_found = {r["doc_type"] for r in results}
         assert "core-policy" in types_found
         assert "adapter-spec" in types_found
+        assert "adapter-profile" in types_found
         assert "contract-schema" in types_found
         assert "template" in types_found
         assert "runbook" in types_found
@@ -80,6 +84,13 @@ class TestScanAndRegister:
         results = scan_and_register(db_conn, authoring_tree)
         adapter_docs = [r for r in results if r["doc_type"] == "adapter-spec"]
         assert len(adapter_docs) >= 2
+
+    def test_adapter_profile_tag(self, db_conn, authoring_tree):
+        register_collection(db_conn)
+        scan_and_register(db_conn, authoring_tree)
+        docs = query_documents(db_conn, collection_name=COLLECTION_NAME, doc_type="adapter-profile")
+        assert len(docs) == 1
+        assert "profile" in docs[0]["tags"].get("policy_area", [])
 
     def test_idempotent_scan(self, db_conn, authoring_tree):
         register_collection(db_conn)
