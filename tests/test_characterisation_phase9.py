@@ -81,6 +81,7 @@ def test_cli_doctor_reports_schema_and_tokenizer_state(tmp_path, monkeypatch, ca
     assert out == [
         f"[PASS] Database directory exists: {tmp_path}",
         "[PASS] Database schema initialized",
+        "[INFO] Claims module: not installed (run 'astaire init --with-claims' to enable)",
         "[PASS] Tokenizer available",
         "[INFO] Approximate token fallback: disabled",
     ]
