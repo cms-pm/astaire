@@ -5,12 +5,13 @@ It defines the collection config and provides a scan-and-register helper
 that maps file patterns to document types and tags.
 """
 
-import logging
 import json
+import logging
 import re
 import sqlite3
 from pathlib import Path
 
+from src.db import transaction
 from src.registry import create_collection, get_collection, register_document
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ COLLECTION_CONFIG = {
         "mutation-report",
         "farley-scorecard",
         "domain-glossary",
+        "test-card",
     ],
     "lifecycle_stages": [
         "ingest",
@@ -59,6 +61,8 @@ COLLECTION_CONFIG = {
         "phase",
         "risk_tier",
         "bundle_type",
+        "id",
+        "paradigm",
     ],
     "statuses": [
         "draft",
@@ -96,11 +100,19 @@ SCAN_RULES: list[tuple[str, str, dict[str, str]]] = [
     ("docs/releases/astaire/", "validation-evidence", {"stage_produced": "release", "bundle_type": "astaire"}),
     ("docs/releases/rtk/", "validation-evidence", {"stage_produced": "release", "bundle_type": "rtk"}),
     ("docs/releases/bootstrap/", "validation-evidence", {"stage_produced": "release", "bundle_type": "bootstrap"}),
+    ("tests/cards/", "test-card", {"stage_produced": "plan"}),
 ]
 
 
 def register_collection(conn: sqlite3.Connection) -> str:
-    """Create the ai-dev-governance collection if it doesn't exist. Returns collection_id."""
+    """Create or refresh the ai-dev-governance collection. Returns collection_id.
+
+    On a pre-existing collection, the stored ``config_json`` is reconciled against
+    the in-code ``COLLECTION_CONFIG`` so newly-added doc_types, lifecycle stages,
+    statuses, or tag keys take effect without requiring operators to drop the DB.
+    Removals are deliberately NOT propagated — only additions — so retired doc
+    types continue to validate against historical documents.
+    """
     existing = get_collection(conn, COLLECTION_NAME)
     if existing:
         if existing["config"] != COLLECTION_CONFIG:
@@ -167,11 +179,16 @@ def scan_and_register(
                 continue
             if filepath.suffix in (".pyc", ".pyo"):
                 continue
+            if _should_skip_scan_file(filepath, doc_type):
+                continue
 
             path_str = str(filepath)
             tags = dict(base_tags)
             external_id = _extract_external_id(filepath, doc_type)
             _extract_phase_chunk_tags(filepath, tags)
+            fm_external = _apply_test_card_frontmatter(filepath, doc_type, tags)
+            if fm_external is not None:
+                external_id = fm_external
             title = _derive_title(filepath, doc_type)
 
             if path_str in existing_paths:
@@ -203,6 +220,8 @@ def scan_and_register(
                 "doc_type": doc_type,
                 "title": title,
             })
+
+    _refresh_test_card_frontmatter_tags(conn, col["collection_id"])
 
     for filepath, doc_type, base_tags in _scan_governance_board(root):
         path_str = str(filepath)
@@ -297,6 +316,13 @@ def _glob_dir_recursive(directory: Path) -> list[Path]:
     )
 
 
+def _should_skip_scan_file(filepath: Path, doc_type: str) -> bool:
+    """Filter helper for generated files under broad governance scan roots."""
+    if doc_type == "test-card" and "_golden" in filepath.parts:
+        return True
+    return False
+
+
 def _scan_governance_board(root: Path) -> list[tuple[Path, str, dict[str, str]]]:
     """Classify project board artifacts under docs/governance/board."""
     board_dir = root / "docs" / "governance" / "board"
@@ -315,6 +341,119 @@ def _scan_governance_board(root: Path) -> list[tuple[Path, str, dict[str, str]]]
         elif name.endswith("memo") or "handoff-memo" in name:
             staged_files.append((filepath, "implementation-handoff", {"stage_produced": "board-review"}))
     return staged_files
+
+
+_TEST_CARD_FRONTMATTER_KEYS = ("id", "paradigm")
+
+
+def _refresh_test_card_frontmatter_tags(
+    conn: sqlite3.Connection, collection_id: str
+) -> None:
+    """Backfill id/paradigm tags + external_id on already-registered test-cards.
+
+    Existing repos that registered test-cards before the frontmatter-aware
+    patch landed will carry only ``stage_produced=plan``. This pass walks every
+    registered test-card document, re-reads frontmatter from disk, and upserts
+    the derived tags. Idempotent — INSERT OR IGNORE keeps repeat scans cheap.
+    """
+    rows = conn.execute(
+        "SELECT document_id, file_path, external_id FROM document "
+        "WHERE collection_id = ? AND doc_type = 'test-card'",
+        (collection_id,),
+    ).fetchall()
+    if not rows:
+        return
+
+    with transaction(conn) as cur:
+        for row in rows:
+            path = Path(row["file_path"])
+            if not path.is_file():
+                continue
+            promoted: dict[str, str | list[str]] = {}
+            fm_id = _apply_test_card_frontmatter(path, "test-card", promoted)
+            for key, value in promoted.items():
+                if isinstance(value, list):
+                    continue
+                cur.execute(
+                    "INSERT OR IGNORE INTO document_tag (document_id, tag_key, tag_value) VALUES (?, ?, ?)",
+                    (row["document_id"], key, value),
+                )
+            if fm_id and not row["external_id"]:
+                cur.execute(
+                    "UPDATE document SET external_id = ? WHERE document_id = ?",
+                    (fm_id, row["document_id"]),
+                )
+
+
+def _apply_test_card_frontmatter(
+    filepath: Path,
+    doc_type: str,
+    tags: dict[str, str | list[str]],
+) -> str | None:
+    """Promote test-card YAML frontmatter into document tags.
+
+    For ``doc_type == "test-card"`` only, parse the YAML frontmatter at the head
+    of the file and lift ``id`` and ``paradigm`` into the document_tag set.
+    Returns the frontmatter ``id`` (used as ``external_id``) or ``None`` if the
+    file is not a test-card or has no parseable frontmatter.
+
+    No-op for every other doc_type — chunk-plan, gherkin, pool-question, etc.
+    remain unchanged.
+    """
+    if doc_type != "test-card":
+        return None
+
+    frontmatter = _read_yaml_frontmatter(filepath)
+    if frontmatter is None:
+        return None
+
+    for key in _TEST_CARD_FRONTMATTER_KEYS:
+        value = frontmatter.get(key)
+        if isinstance(value, str) and value:
+            tags[key] = value
+
+    fm_id = frontmatter.get("id")
+    return fm_id if isinstance(fm_id, str) and fm_id else None
+
+
+def _read_yaml_frontmatter(filepath: Path) -> dict[str, str] | None:
+    """Parse top-level scalar YAML frontmatter from a markdown file.
+
+    Recognises the standard ``---\\n...\\n---\\n`` block and returns a dict of
+    top-level ``key: value`` scalars. Skips list/nested keys (lines that end in
+    ``:`` with no value, or indented continuation lines) because test-card tag
+    promotion only needs ``id`` and ``paradigm``. Returns ``None`` when the file
+    has no frontmatter or cannot be read.
+
+    Intentionally minimal: avoids a YAML dependency to keep Astaire's
+    zero-extra-dep stance (see astaire/CLAUDE.md "No external dependencies
+    except tiktoken").
+    """
+    try:
+        with filepath.open("r", encoding="utf-8") as fh:
+            first_line = fh.readline()
+            if first_line.strip() != "---":
+                return None
+            parsed: dict[str, str] = {}
+            for raw in fh:
+                line = raw.rstrip("\n")
+                if line.strip() == "---":
+                    return parsed
+                if not line or line.startswith(("#", " ", "\t", "-")):
+                    continue
+                if ":" not in line:
+                    continue
+                key, _, value = line.partition(":")
+                key = key.strip()
+                value = value.strip()
+                if not key or not value:
+                    continue
+                if value.startswith(("'", '"')) and value.endswith(value[0]) and len(value) >= 2:
+                    value = value[1:-1]
+                parsed[key] = value
+            return None
+    except OSError:
+        return None
 
 
 def _extract_external_id(filepath: Path, doc_type: str) -> str | None:
