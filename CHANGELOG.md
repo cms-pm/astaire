@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.3] - 2026-10-07
+
+### Added
+- `ai-dev-governance` collection: `test-card` doc type for `tests/cards/`.
+  YAML frontmatter `id` and `paradigm` are promoted to tags, and `id`
+  becomes the document's `external_id`. Already-registered cards are
+  backfilled on the next scan. Generated `_golden/` snapshots are skipped.
+  Forward-ported from work written for an unreleased `0.4.3`; originals are
+  preserved on the `archive/test-card-2026-05` branch.
+
 ## [0.6.2] - 2026-07-26
 
 Note: `0.6.1` was written to `CHANGELOG.md` and `pyproject.toml` but never
