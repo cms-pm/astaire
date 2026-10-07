@@ -189,6 +189,145 @@ class TestScanAndRegister:
         titles = {d["title"] for d in docs}
         assert "Chunk 7.1.11b Two Lane Provisioning Contract" in titles
 
+    # ── test-card frontmatter promotion (chunk 8.1.3 sub-deliverable A) ────
+
+    @pytest.fixture
+    def card_tree(self, tmp_path):
+        """Governance tree with three test-cards and one non-card sample of each
+        affected doc_type, so the non-test-card regression assertion has real
+        data to compare against."""
+        # Three HiL test-cards
+        cards_dir = tmp_path / "tests" / "cards"
+        cards_dir.mkdir(parents=True)
+        (cards_dir / "fleet-upload-hil-chain.md").write_text(
+            "---\n"
+            "id: fleet-upload-hil-chain\n"
+            "schema_version: 1\n"
+            "paradigm: hil\n"
+            "purpose: Prove the chain.\n"
+            "bench_profile: scripts/hil/profiles/stm32g474_phase6.json\n"
+            "prerequisites:\n"
+            "  - none\n"
+            "---\n# Fleet Upload HiL Chain\n"
+        )
+        (cards_dir / "copilot-upload-claim-quiescence.md").write_text(
+            "---\n"
+            "id: copilot-upload-claim-quiescence\n"
+            "schema_version: 1\n"
+            "paradigm: hil\n"
+            "purpose: Prove quiescence.\n"
+            "---\n# Copilot Upload Claim Quiescence\n"
+        )
+        (cards_dir / "fleet-upload-execution-telemetry-proof.md").write_text(
+            "---\n"
+            "id: fleet-upload-execution-telemetry-proof\n"
+            "schema_version: 1\n"
+            "paradigm: hil\n"
+            "purpose: Prove telemetry.\n"
+            "---\n# Fleet Upload Execution Telemetry Proof\n"
+        )
+        golden_dir = cards_dir / "_golden"
+        golden_dir.mkdir()
+        (golden_dir / "fleet-upload-hil-chain.pyocd.sh").write_text(
+            "# generated UTC: <redacted>\nset -euo pipefail\n"
+        )
+
+        # One sample each of doc_types we must NOT touch
+        pq_dir = tmp_path / "docs" / "planning" / "pool_questions"
+        pq_dir.mkdir(parents=True)
+        (pq_dir / "phase-8-test-card-schema.md").write_text("# Q1\n")
+        scn_dir = tmp_path / "docs" / "planning" / "scenarios"
+        scn_dir.mkdir(parents=True)
+        (scn_dir / "SCN-8.1-03-cli-readonly.feature").write_text("Feature: CLI\n")
+        chunk_dir = tmp_path / "docs" / "planning" / "chunks"
+        chunk_dir.mkdir(parents=True)
+        (chunk_dir / "chunk-8.1.3-cli-readonly-surface.md").write_text("# Chunk 8.1.3\n")
+
+        return tmp_path
+
+    def test_test_card_id_tag_promoted(self, db_conn, card_tree):
+        """P81-021-frontmatter-tags-promoted — id tag filter returns exactly one
+        card, and its external_id matches the frontmatter id."""
+        register_ai_dev_governance(db_conn)
+        scan_and_register(db_conn, card_tree)
+
+        rows = query_documents(
+            db_conn,
+            collection_name=COLLECTION_NAME,
+            doc_type="test-card",
+            tags={"id": "fleet-upload-hil-chain"},
+        )
+        assert len(rows) == 1
+        assert rows[0]["external_id"] == "fleet-upload-hil-chain"
+        assert rows[0]["file_path"].endswith("fleet-upload-hil-chain.md")
+
+    def test_test_card_paradigm_tag_filters_to_three(self, db_conn, card_tree):
+        """P81-021-paradigm-filter-works — paradigm=hil returns the three HiL
+        cards and no others."""
+        register_ai_dev_governance(db_conn)
+        scan_and_register(db_conn, card_tree)
+
+        rows = query_documents(
+            db_conn,
+            collection_name=COLLECTION_NAME,
+            doc_type="test-card",
+            tags={"paradigm": "hil"},
+        )
+        ids = {r["external_id"] for r in rows}
+        assert ids == {
+            "fleet-upload-hil-chain",
+            "copilot-upload-claim-quiescence",
+            "fleet-upload-execution-telemetry-proof",
+        }
+
+    def test_test_card_goldens_are_not_registered(self, db_conn, card_tree):
+        """Golden shell snapshots live under tests/cards but are generated
+        evidence, not test-card documents."""
+        register_ai_dev_governance(db_conn)
+        scan_and_register(db_conn, card_tree)
+
+        rows = query_documents(
+            db_conn,
+            collection_name=COLLECTION_NAME,
+            doc_type="test-card",
+        )
+        paths = {r["file_path"] for r in rows}
+        assert not any("_golden" in path.split("/") for path in paths)
+
+    def test_non_test_card_tag_sets_unchanged(self, db_conn, card_tree):
+        """P81-021-non-test-card-unchanged — chunk-plan, gherkin, and
+        pool-question docs do not gain id/paradigm tags from frontmatter
+        promotion (the promotion path is gated on doc_type == 'test-card')."""
+        register_ai_dev_governance(db_conn)
+        scan_and_register(db_conn, card_tree)
+
+        for sample_doc_type in ("chunk-plan", "gherkin", "pool-question"):
+            docs = query_documents(
+                db_conn, collection_name=COLLECTION_NAME, doc_type=sample_doc_type
+            )
+            assert len(docs) == 1, sample_doc_type
+            tag_keys = set(docs[0]["tags"].keys())
+            assert "id" not in tag_keys, sample_doc_type
+            assert "paradigm" not in tag_keys, sample_doc_type
+
+    def test_test_card_frontmatter_with_no_id_skipped(self, db_conn, tmp_path):
+        """A malformed card (frontmatter present but no id) registers but
+        carries no id tag — fail-soft, not fail-closed."""
+        cards_dir = tmp_path / "tests" / "cards"
+        cards_dir.mkdir(parents=True)
+        (cards_dir / "broken.md").write_text(
+            "---\nparadigm: hil\nschema_version: 1\n---\n# broken\n"
+        )
+        register_ai_dev_governance(db_conn)
+        scan_and_register(db_conn, tmp_path)
+        rows = query_documents(
+            db_conn, collection_name=COLLECTION_NAME, doc_type="test-card"
+        )
+        assert len(rows) == 1
+        assert "id" not in rows[0]["tags"]
+        # paradigm should still promote since it parsed cleanly
+        assert rows[0]["tags"].get("paradigm") == ["hil"]
+
     def test_scan_registers_governance_board_artifacts(self, db_conn, gov_tree):
         register_ai_dev_governance(db_conn)
         scan_and_register(db_conn, gov_tree)
