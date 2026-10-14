@@ -2,6 +2,9 @@
 
 A hybrid memory palace — structured, persistent knowledge store that sits between raw source documents and LLM reasoning. Astaire's core is a **document registry** for fast, indexed storage and retrieval of any file set. On top of that, an **optional claims module** adds structured knowledge extraction (entities, claims, relationships, contradictions) — it is off by default and enabled explicitly with `astaire init --with-claims`. The core is document-type agnostic; applications plug in as "collections" with their own document types, tags, and lifecycle conventions.
 
+Astaire ships inside [ai-dev-governance](https://github.com/cms-pm/ai-dev-governance),
+the framework used throughout [*Fail Closed: Governing AI Coding Agents on Real Hardware*](https://failclosed.dev).
+
 ## Why Astaire?
 
 LLM workflows typically read raw files for context. This is slow, expensive, and unstructured. Astaire provides:
